@@ -249,37 +249,66 @@ class FeatureExtractor:
         """
         Detect OFDM via cyclic-prefix autocorrelation.
 
-        Try candidate FFT sizes and CP ratios; return the best match.
-        A normalised correlation > 0.7 is considered a detection.
+        For each candidate (Nfft, Ncp), correlate the CP samples of each
+        OFDM symbol with the corresponding tail of the IFFT output.
+        Only triggered when spectral_flatness > 0.3 (OFDM has many equal-power
+        subcarriers; AM/FM signals are tonal → flatness near 0).
         """
         nfft_candidates = [64, 128, 256, 512, 1024, 2048]
         cp_ratios       = [1/4, 1/8, 1/16, 1/32]
-        best_corr       = 0.0
-        best_nfft       = 0
-        best_cp         = 0.0
 
         x = iq[:min(len(iq), 32768)]
-        pwr = np.mean(np.abs(x) ** 2)
+        pwr = float(np.mean(np.abs(x) ** 2))
         if pwr < 1e-12:
             return False, 0, 0.0
 
+        # Spectral flatness gate: OFDM has near-flat spectrum
+        n_fft_check = min(len(x), 4096)
+        P    = np.abs(np.fft.fft(x[:n_fft_check])) ** 2
+        eps  = 1e-30
+        geo  = float(np.exp(np.mean(np.log(P + eps))))
+        ari  = float(np.mean(P) + eps)
+        spec_flat = float(np.clip(geo / ari, 0, 1))
+        if spec_flat < 0.30:          # tonal/AM/FM → not OFDM
+            return False, 0, 0.0
+
+        best_corr = 0.0
+        best_nfft = 0
+        best_cp   = 0.0
+
         for nfft in nfft_candidates:
             for cp_frac in cp_ratios:
-                ncp   = int(nfft * cp_frac)
-                lag   = nfft
-                avail = len(x) - lag - ncp
-                if avail < 1:
+                ncp    = max(1, int(nfft * cp_frac))
+                stride = nfft + ncp
+                n_sym  = len(x) // stride
+                if n_sym < 2:
                     continue
-                # Correlation of x[n] with x[n + nfft] over CP window
-                a = x[:avail]
-                b = x[lag:lag + avail]
-                corr = float(np.abs(np.mean(a * np.conj(b))) / pwr)
+
+                # Correlate CP (start of symbol) with corresponding tail of IFFT
+                corr_acc = 0.0
+                count    = 0
+                for i in range(n_sym):
+                    cp_start   = i * stride
+                    data_start = cp_start + ncp
+                    tail_start = data_start + nfft - ncp
+                    cp_end     = cp_start  + ncp
+                    tail_end   = tail_start + ncp
+                    if tail_end > len(x):
+                        break
+                    cp_seg   = x[cp_start:cp_end]
+                    tail_seg = x[tail_start:tail_end]
+                    corr_acc += float(np.abs(np.mean(cp_seg * np.conj(tail_seg))))
+                    count    += 1
+
+                if count == 0:
+                    continue
+                corr = (corr_acc / count) / (pwr + 1e-30)
                 if corr > best_corr:
                     best_corr = corr
                     best_nfft = nfft
                     best_cp   = cp_frac
 
-        detected = best_corr > 0.70
+        detected = best_corr > 0.60
         return detected, best_nfft if detected else 0, best_cp if detected else 0.0
 
     def _detect_fhss(self, iq: np.ndarray, sr: float) \

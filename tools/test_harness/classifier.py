@@ -67,17 +67,13 @@ class ModulationClassifier:
     def classify(self, f: SignalFeatures) -> ClassificationResult:
         r = ClassificationResult()
 
-        if f.snr_db < self.SNR_MIN_DB:
-            r.reject_reason = f"SNR too low: {f.snr_db:.1f} dB < {self.SNR_MIN_DB} dB"
-            return r
+        r.is_burst   = f.is_burst
+        r.burst_duty = f.burst_duty_cycle
+        r.is_fhss    = f.fhss_detected
+        r.is_tdma    = f.is_burst and f.burst_period_ms > 0
 
-        r.classified     = True
-        r.is_burst       = f.is_burst
-        r.burst_duty     = f.burst_duty_cycle
-        r.is_fhss        = f.fhss_detected
-        r.is_tdma        = f.is_burst and f.burst_period_ms > 0
-
-        # ── Layer 2/3: structural fast-paths ──────────────────────────────────
+        # ── Layer 2/3: structural fast-paths (run before SNR gate) ───────────
+        # OFDM CP detection is reliable even at low SNR
         if f.chirp_detected:
             r.digital_modulation = "CSS"
             r.symbol_rate_sps    = abs(f.chirp_rate_hz_s / f.sample_rate_sps) if f.sample_rate_sps else 0
@@ -93,6 +89,13 @@ class ModulationClassifier:
         if f.fhss_detected:
             r.digital_modulation = "FHSS"
             return r
+
+        # SNR gate applies to modulation classification (not structural detection)
+        if f.snr_db < self.SNR_MIN_DB:
+            r.reject_reason = f"SNR too low: {f.snr_db:.1f} dB < {self.SNR_MIN_DB} dB"
+            return r
+
+        r.classified = True
 
         # ── Layer 1: Analog vs digital ────────────────────────────────────────
         if self._is_analog(f):
@@ -112,17 +115,12 @@ class ModulationClassifier:
 
     def _is_analog(self, f: SignalFeatures) -> bool:
         """
-        Analog decision:
-          - High envelope variance (AM) OR
-          - High FM deviation relative to BW (FM) OR
-          - Constant envelope with significant phase variance (PM)
+        Analog AM decision only: high envelope variance.
+        FM/PM are handled inside _classify_digital (constant-envelope branch)
+        because their cumulant values overlap with digital FSK/PSK, and the
+        disambiguation depends on features only available in that context.
         """
-        if f.envelope_variance_norm > self.AM_ENV_THRESH:
-            return True
-        if f.fm_deviation_hz > f.bandwidth_hz * self.FM_DEV_FRACTION and \
-                f.envelope_variance_norm < self.CONST_ENV_THRESH:
-            return True
-        return False
+        return f.envelope_variance_norm > self.AM_ENV_THRESH
 
     def _classify_analog(self, f: SignalFeatures) -> tuple[str, float]:
         """Returns (modulation_string, index_or_deviation)."""
@@ -174,30 +172,58 @@ class ModulationClassifier:
         def near(x, target, tol):
             return abs(x - target) < tol
 
+        # Empirically verified cumulant reference (unit-power signals):
+        #   BPSK (real ±1):      c40 = -2,    c42 = -2
+        #   QPSK (normalised):   c40 = -1,    c42 = -1
+        #   8PSK (unit circle):  c40 =  0,    c42 = -1
+        #   FSK/GMSK (CE):       c40 =  0,    c42 = -1
+        #   QAM16:               c40 = -0.68, c42 = -0.68
+        #   QAM64:               c40 = -0.62, c42 = -0.62
+        # Key discriminants:
+        #   BPSK vs QPSK: c42 (-2 vs -1) is the primary discriminant
+        #   QPSK vs FSK:  c40 (-1 vs 0) distinguishes them
+        #   FSK vs 8PSK:  use fm_deviation_hz and inst_freq_std
+
         # ── Constant envelope family ──────────────────────────────────────────
         if const_env:
-            if near(c42, -2.0, 0.7) and near(c40, 0.0, 0.5):
-                # FSK / MSK / GMSK
-                if f.symbol_rate_sps > 0 and f.bandwidth_hz > 0:
-                    mod_idx = f.fm_deviation_hz / (f.symbol_rate_sps / 2.0) \
-                              if f.symbol_rate_sps > 0 else 1.0
-                    if abs(mod_idx - 0.5) < 0.15:
-                        return "MSK/GMSK", 2
-                return "FSK", 2
-
-            if near(c40, -2.0, 0.5) and near(c42, 2.0, 0.6):
+            # BPSK: c40=-2, c42=-2 (distinctive — most negative of all PSK)
+            if near(c40, -2.0, 0.6) and near(c42, -2.0, 0.7):
                 return "BPSK", 2
-            if near(c40, -2.0, 0.6) and near(c42, 0.0, 0.4):
-                return "QPSK", 4
-            if near(c40, 0.0, 0.4) and near(c42, 0.0, 0.4):
-                return "8PSK", 8
 
-            return "PSK", 2   # fallback
+            # QPSK (normalised constellation): c40≈-1, c42≈-1
+            if near(c40, -1.0, 0.5) and near(c42, -1.0, 0.5):
+                return "QPSK", 4
+
+            # c40≈0, c42≈-1: covers FSK, FM, 8PSK, GMSK
+            # Disambiguate using instantaneous frequency behaviour:
+            #   Analog FM: large, smooth inst_freq deviation — no discrete symbol rate
+            #   Digital FSK: large inst_freq, symbol rate detectable
+            #   8PSK: very small inst_freq (phase modulation, not frequency)
+            if near(c40, 0.0, 0.6) and near(c42, -1.0, 0.6):
+                # Estimate true FM deviation (exclude PSK phase-jump spikes by
+                # using the bandwidth as context: BPSK inst_freq >> BW, FM < BW)
+                sr = f.sample_rate_sps if f.sample_rate_sps > 0 else 1e6
+                bw = f.bandwidth_hz if f.bandwidth_hz > 0 else sr * 0.1
+                # For analog FM the deviation is bounded by bandwidth
+                dev_ratio = f.fm_deviation_hz / bw if bw > 0 else 0
+                if dev_ratio > 0.05:              # noticeable frequency deviation
+                    if f.symbol_rate_sps > 0:     # symbol rate found → digital FSK
+                        h = f.fm_deviation_hz / (f.symbol_rate_sps / 2.0 + 1e-3)
+                        if abs(h - 0.5) < 0.25:
+                            return "MSK/GMSK", 2
+                        return "FSK", 2
+                    else:                          # no symbol rate → analog FM
+                        if f.fm_deviation_hz > 50_000:
+                            return "FM_WB", 0
+                        return "FM_NB", 0
+                return "8PSK", 8                  # little freq deviation → phase mod
+
+            return "PSK", 2   # fallback constant-envelope
 
         # ── Variable amplitude family ─────────────────────────────────────────
-        if near(c40, -2.0, 0.5) and near(c42, 2.0, 0.6):
+        if near(c40, -2.0, 0.6) and near(c42, -2.0, 0.7):
             return "BPSK", 2
-        if near(c40, -2.0, 0.6) and near(c42, 0.0, 0.4):
+        if near(c40, -1.0, 0.5) and near(c42, -1.0, 0.5):
             return "QPSK", 4
         if near(c40, -0.68, 0.15) and near(c42, -0.68, 0.15):
             return "QAM16", 16
@@ -208,7 +234,7 @@ class ModulationClassifier:
         if near(c40, -0.46, 0.12) and near(c42, -0.46, 0.12):
             return "QAM256", 256
 
-        # M-ASK (amplitude steps, variable envelope)
+        # M-ASK / OOK: high envelope variance
         if ev > 0.3 and abs(c42) > 1.0:
             return "M-ASK/OOK", 2
 
