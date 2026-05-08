@@ -1,0 +1,255 @@
+# ════════════════════════════════════════════════════════════════════════
+#  AnalysisApp RF Signal Auto-Identification — Kubernetes / k3s Manifests
+#
+#  Apply:
+#    kubectl apply -f deploy/k8s/deployment.yaml
+#
+#  Update config only:
+#    kubectl create configmap analysis-config -n sdr-system \
+#      --from-file=analysis.xml=config/analysis.xml \
+#      --dry-run=client -o yaml | kubectl apply -f -
+#    kubectl rollout restart deployment/sdr-analysis -n sdr-system
+# ════════════════════════════════════════════════════════════════════════
+
+---
+# ── Namespace (shared with SdrResourceManager) ─────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sdr-system
+  labels:
+    app.kubernetes.io/name: sdr-system
+
+---
+# ── ConfigMap: analysis.xml ────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: analysis-config
+  namespace: sdr-system
+  labels:
+    app: sdr-analysis
+data:
+  analysis.xml: |
+    <sdr_analysis>
+      <scanner_id>analysis-0</scanner_id>
+      <streaming_ip>0.0.0.0</streaming_ip>
+
+      <amqp>
+        <url>amqp://activemq-service.sdr-system.svc.cluster.local:5672</url>
+        <username>sdr_ctrl</username>
+        <password>CHANGE_ME</password>
+        <detections_topic>rf.detections</detections_topic>
+        <analysis_topic>rf.analysis</analysis_topic>
+        <task_request_queue>sdr.task.request</task_request_queue>
+        <task_response_queue>sdr.task.response</task_response_queue>
+      </amqp>
+
+      <collector>
+        <analysis_sample_rate_sps>2000000</analysis_sample_rate_sps>
+        <collect_samples>1000000</collect_samples>
+        <analysis_timeout_ms>5000</analysis_timeout_ms>
+      </collector>
+
+      <engine>
+        <fft_size>4096</fft_size>
+        <snr_threshold_db>5.0</snr_threshold_db>
+        <rank>1</rank>
+      </engine>
+    </sdr_analysis>
+
+---
+# ── Secret: AMQP credentials ───────────────────────────────────────────
+# Create with:
+#   kubectl create secret generic analysis-amqp-credentials \
+#     -n sdr-system --from-literal=username=sdr_ctrl \
+#     --from-literal=password=CHANGE_ME
+apiVersion: v1
+kind: Secret
+metadata:
+  name: analysis-amqp-credentials
+  namespace: sdr-system
+type: Opaque
+stringData:
+  username: sdr_ctrl
+  password: CHANGE_ME  # !! Set before applying — never commit a real password
+
+---
+# ── Service: UDP IQ receive + internal ────────────────────────────────
+# Analysis pods bind a UDP port range to receive IQ from SdrResourceManager.
+# SdrResourceManager resolves pod IPs via the Endpoints list; the Service
+# provides stable DNS for AMQP (TCP) traffic only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sdr-analysis
+  namespace: sdr-system
+  labels:
+    app: sdr-analysis
+spec:
+  selector:
+    app: sdr-analysis
+  ports:
+    # UDP IQ stream receive (SdrResourceManager sends on 20000–20099)
+    - name: iq-udp-base
+      port: 20000
+      targetPort: 20000
+      protocol: UDP
+  type: ClusterIP
+
+---
+# ── Deployment ─────────────────────────────────────────────────────────
+# Analysis is stateless — multiple replicas are safe.
+# Each replica registers its POD_IP with the AMQP broker; SdrResourceManager
+# sends IQ directly to the pod IP announced in the task ACCEPT response.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sdr-analysis
+  namespace: sdr-system
+  labels:
+    app: sdr-analysis
+    version: "2.3.0"
+spec:
+  replicas: 2  # Scale up for more parallel analysis tasks
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: sdr-analysis
+  template:
+    metadata:
+      labels:
+        app: sdr-analysis
+        version: "2.3.0"
+      annotations:
+        prometheus.io/scrape: "false"
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: sdr-analysis
+          image: ghcr.io/BMichaud7/sdr-analysis:2.3.0  # ← update tag on each release
+          imagePullPolicy: Always
+
+          env:
+            - name: SDR_CONFIG_PATH
+              value: /etc/sdr-analysis/analysis.xml
+            - name: SDR_LOG_LEVEL
+              value: info
+            # Pod's own IP — written into AMQP ACCEPT response so
+            # SdrResourceManager knows where to send IQ UDP packets
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+
+          ports:
+            # UDP IQ receive range (one port per active task)
+            - containerPort: 20000
+              protocol: UDP
+              name: iq-udp
+
+          volumeMounts:
+            - name: analysis-config-volume
+              mountPath: /etc/sdr-analysis
+              readOnly: true
+
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "256Mi"
+            limits:
+              cpu: "4"
+              memory: "2Gi"
+
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+      volumes:
+        - name: analysis-config-volume
+          configMap:
+            name: analysis-config
+            items:
+              - key: analysis.xml
+                path: analysis.xml
+
+---
+# ── NetworkPolicy ──────────────────────────────────────────────────────
+# Analysis pods:
+#   Ingress:  UDP IQ from sdr-controller pods
+#   Egress:   AMQP to broker, DNS
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sdr-analysis-netpol
+  namespace: sdr-system
+spec:
+  podSelector:
+    matchLabels:
+      app: sdr-analysis
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # UDP IQ streams from sdr-controller
+    - from:
+        - podSelector:
+            matchLabels:
+              app: sdr-controller
+      ports:
+        - port: 20000
+          endPort: 20099
+          protocol: UDP
+  egress:
+    # AMQP to ActiveMQ broker
+    - to:
+        - podSelector:
+            matchLabels:
+              app: activemq
+      ports:
+        - port: 5672
+          protocol: TCP
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+---
+# ── PodDisruptionBudget ────────────────────────────────────────────────
+# Keep at least one analysis pod alive during cluster maintenance.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: sdr-analysis-pdb
+  namespace: sdr-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: sdr-analysis

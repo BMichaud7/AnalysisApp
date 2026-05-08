@@ -87,6 +87,36 @@ else()
     set(UUID_INCLUDE_DIR "")
 endif()
 
+# ── ONNX Runtime (optional — enables ML-based AMR via OnnxClassifier) ────────
+# Download from https://github.com/microsoft/onnxruntime/releases
+# and set ONNXRUNTIME_ROOT to the extracted directory, or install system-wide.
+#
+#   CentOS/RHEL:
+#     curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/\
+#          onnxruntime-linux-x64-1.17.3.tgz | tar xz -C /opt
+#     cmake ... -DONNXRUNTIME_ROOT=/opt/onnxruntime-linux-x64-1.17.3
+#
+#   CUDA variant:
+#     cmake ... -DONNXRUNTIME_ROOT=/opt/onnxruntime-linux-x64-gpu-1.17.3
+option(WITH_ONNX "Enable ONNX Runtime for ML-based classification" OFF)
+if(WITH_ONNX)
+    set(ONNXRUNTIME_ROOT "" CACHE PATH "Path to extracted onnxruntime directory")
+    find_library(ONNXRUNTIME_LIB onnxruntime
+        HINTS "${ONNXRUNTIME_ROOT}/lib" /usr/local/lib /usr/lib)
+    find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
+        HINTS "${ONNXRUNTIME_ROOT}/include" /usr/local/include /usr/include)
+    if(ONNXRUNTIME_LIB AND ONNXRUNTIME_INCLUDE_DIR)
+        message(STATUS "[AnalysisApp] ONNX Runtime: found (${ONNXRUNTIME_LIB})")
+        add_library(onnxruntime::onnxruntime INTERFACE IMPORTED)
+        target_include_directories(onnxruntime::onnxruntime INTERFACE ${ONNXRUNTIME_INCLUDE_DIR})
+        target_link_libraries(onnxruntime::onnxruntime INTERFACE ${ONNXRUNTIME_LIB})
+    else()
+        message(FATAL_ERROR "[AnalysisApp] ONNX Runtime not found.\n"
+            "  Download: https://github.com/microsoft/onnxruntime/releases\n"
+            "  Then: cmake -DONNXRUNTIME_ROOT=/path/to/onnxruntime ...")
+    endif()
+endif()
+
 # ── Library target ────────────────────────────────────────────────────────────
 set(ANALYSIS_SOURCES
     src/Config.cpp
@@ -118,6 +148,10 @@ target_link_libraries(analysis_lib PUBLIC
 if(UUID_LIB)
     target_link_libraries(analysis_lib PUBLIC ${UUID_LIB})
 endif()
+if(WITH_ONNX)
+    target_link_libraries(analysis_lib PUBLIC onnxruntime::onnxruntime)
+    target_compile_definitions(analysis_lib PUBLIC ANALYSIS_WITH_ONNX=1)
+endif()
 
 # Proton linkage (cmake package path vs pkg-config path)
 if(ProtonCpp_FOUND)
@@ -134,6 +168,13 @@ target_compile_definitions(analysis_lib PRIVATE
 # ── Main binary ───────────────────────────────────────────────────────────────
 add_executable(sdr_analysis src/main.cpp)
 target_link_libraries(sdr_analysis PRIVATE analysis_lib)
+
+# ── Install ───────────────────────────────────────────────────────────────────
+include(GNUInstallDirs)
+install(TARGETS sdr_analysis
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES config/analysis.xml
+        DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/sdr-analysis)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 include(FetchContent)
@@ -162,4 +203,5 @@ message(STATUS "│  C++ standard  : C++20                                      
 message(STATUS "│  Build type    : ${CMAKE_BUILD_TYPE}                          │")
 message(STATUS "│  FFTW3f        : ${FFTW3F_VERSION}                            │")
 message(STATUS "│  qpid-proton   : ${PROTON_VERSION}                            │")
+message(STATUS "│  ONNX Runtime  : ${WITH_ONNX}                                 │")
 message(STATUS "└───────────────────────────────────────────────────────────────┘")
