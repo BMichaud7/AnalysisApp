@@ -186,12 +186,20 @@ class ModulationClassifier:
 
         # ── Constant envelope family ──────────────────────────────────────────
         if const_env:
-            # BPSK: c40=-2, c42=-2 (distinctive — most negative of all PSK)
-            if near(c40, -2.0, 0.6) and near(c42, -2.0, 0.7):
+            # ── BPSK vs FM disambiguation (both have high m20_max) ───────────
+            # BPSK: π transitions create large inst_freq spikes → kurtosis >> 0.
+            # FM  : smooth continuous phase → inst_freq is near-Gaussian → kurt ≈ 0.
+            # PSK threshold: kurtosis > 3 (BPSK/QPSK ≈ 12–13, FM ≈ -0.1).
+            _is_psk_like = f.inst_freq_kurtosis > 3.0
+
+            # BPSK: PSK-like transitions + high m20_max (E[s²]=1) + strong c40_min
+            if _is_psk_like and (f.m20_max > 0.45 or f.c40_min < -1.5 or
+                                  (near(c40, -2.0, 0.6) and near(c42, -2.0, 0.7))):
                 return "BPSK", 2
 
-            # QPSK (normalised constellation): c40≈-1, c42≈-1
-            if near(c40, -1.0, 0.5) and near(c42, -1.0, 0.5):
+            # QPSK: PSK-like transitions + low m20_max (E[s²]=0 by symmetry)
+            #       c40_min ∈ (-1.5, -0.3) confirms not FM/FSK (which give ≈ 0).
+            if _is_psk_like and -1.5 < f.c40_min < -0.3 and f.m20_max < 0.45:
                 return "QPSK", 4
 
             # c40≈0, c42≈-1: covers FSK, FM, 8PSK, GMSK

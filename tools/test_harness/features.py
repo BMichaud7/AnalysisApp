@@ -38,6 +38,22 @@ class SignalFeatures:
     c40_imag:                float = 0.0
     c42:                     float = 0.0
     c41_real:                float = 0.0
+    # Phase-noise resilient PSK features (computed over short sub-windows):
+    #   c40_min : minimum (most negative) c40 across 256-sample windows.
+    #             BPSK: some windows have low phase drift → c40 near -2.
+    #             QPSK: c40 stays near -1 regardless.
+    #   m20_max : maximum |M20|/M21 across windows.
+    #             BPSK: |M20|≈1 in low-drift windows (E[s²]=1).
+    #             QPSK/FSK: |M20|≈0 by constellation symmetry.
+    m20_mag:                 float = 0.0   # global |M20| (kept for compatibility)
+    c40_min:                 float = 0.0   # windowed minimum c40
+    m20_max:                 float = 0.0   # windowed maximum |M20|
+    # Excess kurtosis of instantaneous frequency.
+    # BPSK: very high (> 5) — large spikes at π transitions, flat otherwise.
+    # FM  : near 0        — Gaussian inst_freq from continuous phase variation.
+    # FSK : negative      — bimodal distribution at two discrete frequencies.
+    # Distinguishes BPSK from FM_NB when both have high m20_max in short windows.
+    inst_freq_kurtosis:      float = 0.0
 
     symbol_rate_sps:         float = 0.0
     bit_rate_bps:            float = 0.0
@@ -169,6 +185,11 @@ class FeatureExtractor:
         f.inst_freq_std_hz  = float(np.std(inst_freq))
         f.fm_deviation_hz   = f.inst_freq_std_hz
 
+        _if_var = float(np.var(inst_freq)) + 1e-30
+        f.inst_freq_kurtosis = float(
+            np.mean((inst_freq - np.mean(inst_freq)) ** 4) / _if_var ** 2 - 3
+        )
+
         # Instantaneous phase std (unwrapped)
         inst_phase = np.unwrap(np.angle(iq))
         f.inst_phase_std = float(np.std(np.diff(inst_phase)))
@@ -188,6 +209,27 @@ class FeatureExtractor:
             f.c40_real = float(np.real(C40) / M21 ** 2)
             f.c40_imag = float(np.imag(C40) / M21 ** 2)
             f.c42      = float(np.real(C42) / M21 ** 2)
+            f.m20_mag  = float(abs(M20) / M21)
+
+        # ── Windowed cumulants (phase-noise resilient) ────────────────────────
+        # Short windows have less phase drift, restoring c40≈-2 for BPSK and
+        # preserving |M20|≈1 in windows where the LO hasn't drifted far yet.
+        # Window length: 256 samples — 0.28 rad drift at 10 Hz LW / 200 kHz SR.
+        _win = 256
+        _c40_wins, _m20_wins = [], []
+        for _i in range(len(iq) // _win):
+            _xs   = iq[_i*_win : (_i+1)*_win].astype(np.complex128)
+            _m21w = float(np.mean(np.abs(_xs) ** 2))
+            if _m21w < 1e-15:
+                continue
+            _M20w = np.mean(_xs * _xs)
+            _M40w = np.mean(_xs ** 4)
+            _C40w = _M40w - 3 * _M20w ** 2
+            _c40_wins.append(float(np.real(_C40w) / _m21w ** 2))
+            _m20_wins.append(float(abs(_M20w) / _m21w))
+        if _c40_wins:
+            f.c40_min = float(min(_c40_wins))
+            f.m20_max = float(max(_m20_wins))
 
         # ── 9. Symbol rate estimation ─────────────────────────────────────────
         f.symbol_rate_sps = self._estimate_symbol_rate(iq, sample_rate)
