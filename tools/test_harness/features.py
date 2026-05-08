@@ -95,6 +95,17 @@ class FeatureExtractor:
         if len(iq) < 256:
             return f
 
+        # ── 0. Coarse CFO compensation ────────────────────────────────────────
+        # Estimate residual carrier frequency offset from mean instantaneous
+        # frequency and remove it before computing spectral and cumulant features.
+        # This makes cumulant values stable under hardware frequency errors and
+        # phase noise that accumulate as a slow linear drift.
+        _phase_diff = np.angle(iq[1:] * np.conj(iq[:-1]))
+        _cfo_hz     = float(np.mean(_phase_diff)) * sample_rate / (2 * np.pi)
+        if abs(_cfo_hz) > 1.0:
+            _t  = np.arange(len(iq), dtype=np.float32) / sample_rate
+            iq  = iq * np.exp(-1j * 2 * np.pi * _cfo_hz * _t).astype(np.complex64)
+
         # ── 1. PSD ────────────────────────────────────────────────────────────
         freqs, psd = welch(iq, fs=sample_rate, nperseg=min(self.fft_size, len(iq)//4),
                            return_onesided=False)
@@ -126,9 +137,16 @@ class FeatureExtractor:
         f.spectral_flatness = float(np.clip(geo_mean / ari_mean, 0, 1))
 
         # ── 5. Spectral symmetry ──────────────────────────────────────────────
-        n = len(psd)
-        left  = psd[:n//2]
-        right = psd[n//2:][::-1][:len(left)]
+        # Exclude the DC bin (index n//2 after fftshift) from both halves so
+        # a strong carrier at DC does not create a false asymmetry between
+        # the negative- and positive-frequency halves.
+        n    = len(psd)
+        half = n // 2
+        left  = psd[1:half]           # negative freqs, excluding DC
+        right = psd[half+1:][::-1]    # positive freqs, excluding DC, reversed
+        min_len = min(len(left), len(right))
+        left  = left[:min_len]
+        right = right[:min_len]
         denom = np.mean(left + right) + eps
         f.spectral_symmetry = float(1.0 - np.mean(np.abs(left - right)) / denom)
 

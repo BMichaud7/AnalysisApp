@@ -61,7 +61,7 @@ class ModulationClassifier:
 
     SNR_MIN_DB          = 5.0
     CONST_ENV_THRESH    = 0.08    # envelope_variance_norm threshold
-    AM_ENV_THRESH       = 0.20
+    AM_ENV_THRESH       = 0.12   # lowered from 0.20 — real AM at 80-90% depth gives ~0.15
     FM_DEV_FRACTION     = 0.10
 
     def classify(self, f: SignalFeatures) -> ClassificationResult:
@@ -207,10 +207,16 @@ class ModulationClassifier:
                 # For analog FM the deviation is bounded by bandwidth
                 dev_ratio = f.fm_deviation_hz / bw if bw > 0 else 0
                 if dev_ratio > 0.05:              # noticeable frequency deviation
-                    if f.symbol_rate_sps > 0:     # symbol rate found → digital FSK
+                    if f.symbol_rate_sps > 0:     # symbol rate found — may be digital FSK
                         h = f.fm_deviation_hz / (f.symbol_rate_sps / 2.0 + 1e-3)
                         if abs(h - 0.5) < 0.25:
                             return "MSK/GMSK", 2
+                        # Large h (>> 1) means the "symbol rate" is a spurious peak
+                        # in the FM sidebands, not a real bit clock — classify as FM
+                        if h > 3.0:
+                            if f.fm_deviation_hz > 50_000:
+                                return "FM_WB", 0
+                            return "FM_NB", 0
                         return "FSK", 2
                     else:                          # no symbol rate → analog FM
                         if f.fm_deviation_hz > 50_000:
