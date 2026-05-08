@@ -16,7 +16,11 @@ static void signalHandler(int sig)
 
 int main(int argc, char** argv)
 {
-    spdlog::set_level(spdlog::level::info);
+    const char* log_level_env = std::getenv("SDR_LOG_LEVEL");
+    spdlog::set_level(
+        (log_level_env && std::string(log_level_env) == "debug")
+            ? spdlog::level::debug : spdlog::level::info
+    );
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
 
     if (argc < 2) {

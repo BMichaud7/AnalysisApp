@@ -1,0 +1,26 @@
+<sdr_analysis>
+  <scanner_id>analysis-0</scanner_id>
+  <streaming_ip>10.89.0.10</streaming_ip>
+
+  <amqp>
+    <url>amqp://10.89.0.2:5672</url>
+    <username>sdr_ctrl</username>
+    <password>test_password</password>
+    <detections_topic>rf.detections</detections_topic>
+    <analysis_topic>rf.analysis</analysis_topic>
+    <task_request_queue>sdr.task.request</task_request_queue>
+    <task_response_queue>sdr.task.response</task_response_queue>
+  </amqp>
+
+  <collector>
+    <analysis_sample_rate_sps>2000000</analysis_sample_rate_sps>
+    <collect_samples>1000000</collect_samples>
+    <analysis_timeout_ms>5000</analysis_timeout_ms>
+  </collector>
+
+  <engine>
+    <fft_size>4096</fft_size>
+    <snr_threshold_db>5.0</snr_threshold_db>
+    <rank>1</rank>
+  </engine>
+</sdr_analysis>

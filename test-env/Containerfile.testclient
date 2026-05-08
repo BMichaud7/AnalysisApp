@@ -1,0 +1,6 @@
+FROM quay.io/centos/centos:stream10
+RUN dnf install -y epel-release && \
+    dnf install -y python3-qpid-proton python3-pip cyrus-sasl-plain numpy && \
+    pip3 install numpy -q && \
+    dnf clean all
+WORKDIR /test

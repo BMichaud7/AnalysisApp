@@ -20,6 +20,9 @@ FROM quay.io/centos/centos:stream10 AS builder
 
 ENV LANG=C.UTF-8
 
+# Enable EPEL (provides qpid-proton-cpp-devel, tinyxml2-devel, fmt-devel, fftw-devel)
+RUN dnf install -y epel-release && dnf clean all
+
 # Build tools + all library dependencies
 RUN dnf install -y \
         cmake \
@@ -68,15 +71,19 @@ FROM quay.io/centos/centos:stream10 AS runtime
 ENV LANG=C.UTF-8
 
 # Runtime shared libraries only (no -devel headers)
-RUN dnf install -y \
+RUN dnf install -y epel-release && \
+    dnf install -y \
         fftw \
         qpid-proton-cpp \
         tinyxml2 \
         libuuid \
         fmt \
-        # tini: proper PID-1 signal forwarding in containers
-        tini \
+        cyrus-sasl-plain \
     && dnf clean all
+
+# tini is not in EPEL 10 — fetch static binary directly
+ADD https://github.com/krallin/tini/releases/download/v0.19.0/tini-static-amd64 /usr/local/bin/tini
+RUN chmod +x /usr/local/bin/tini
 
 # Non-root service user
 RUN groupadd -r sdranalysis && \
@@ -97,5 +104,5 @@ ENV SDR_LOG_LEVEL=info
 
 EXPOSE 20000-20099/udp
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
+ENTRYPOINT ["/usr/local/bin/tini", "--"]
 CMD ["/usr/local/bin/sdr_analysis", "--config", "/etc/sdr-analysis/analysis.xml"]
