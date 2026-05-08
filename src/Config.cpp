@@ -85,10 +85,24 @@ AppConfig parseConfig(const std::string& xml_path)
     // <engine>
     const auto* eng_el = root->FirstChildElement("engine");
     if (eng_el) {
-        cfg.engine.fft_size          = xmlDouble(eng_el, "fft_size",          cfg.engine.fft_size);
-        cfg.engine.snr_threshold_db  = xmlDouble(eng_el, "snr_threshold_db",  cfg.engine.snr_threshold_db);
+        cfg.engine.fft_size            = xmlDouble(eng_el, "fft_size",            cfg.engine.fft_size);
+        cfg.engine.snr_threshold_db    = xmlDouble(eng_el, "snr_threshold_db",    cfg.engine.snr_threshold_db);
         cfg.engine.guard_band_fraction = xmlDouble(eng_el, "guard_band_fraction", cfg.engine.guard_band_fraction);
-        cfg.engine.rank              = xmlInt   (eng_el, "rank",              cfg.engine.rank);
+        cfg.engine.rank                = xmlInt   (eng_el, "rank",                cfg.engine.rank);
+
+        // <engine><onnx> — optional ML fallback
+        const auto* onnx_el = eng_el->FirstChildElement("onnx");
+        if (onnx_el) {
+            cfg.engine.onnx.model_path   = xmlText  (onnx_el, "model_path",  "");
+            cfg.engine.onnx.classes_path = xmlText  (onnx_el, "classes_path","");
+            cfg.engine.onnx.use_gpu      = xmlText  (onnx_el, "use_gpu",     "true") != "false";
+            cfg.engine.onnx.input_len    = xmlInt   (onnx_el, "input_len",   1024);
+            cfg.engine.onnx.fallback_confidence =
+                xmlDouble(onnx_el, "fallback_confidence_threshold", 0.60);
+            cfg.engine.onnx.fallback_on_unknown =
+                xmlText(onnx_el, "fallback_on_unknown", "true") != "false";
+            cfg.engine.onnx.enabled = !cfg.engine.onnx.model_path.empty();
+        }
     }
 
     spdlog::info("Config loaded from '{}': scanner={} amqp={}",

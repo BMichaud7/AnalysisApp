@@ -50,6 +50,12 @@ struct AnalysisResult {
 
     bool  classified;  // false if SNR too low or features inconclusive
     std::string reject_reason;
+
+    // Path metadata
+    float rule_confidence = 0.f;  // 0–1: certainty of rule-based result
+                                  // (1.0 = structural detection, 0.0 = UNKNOWN)
+    bool  onnx_used = false;      // true if ONNX classifier overrode or augmented
+    float onnx_confidence = 0.f;  // softmax probability from ONNX (if used)
 };
 
 } // namespace analysis

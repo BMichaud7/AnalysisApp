@@ -1,4 +1,5 @@
 #pragma once
+#include "OnnxClassifier.hpp"
 #include <string>
 #include <cstdint>
 
@@ -22,9 +23,10 @@ struct CollectorConfig {
 
 struct EngineConfig {
     double      fft_size             = 4096;
-    double      guard_band_fraction  = 0.1;    // fraction of BW to ignore at edges
-    double      snr_threshold_db     = 5.0;    // min SNR to attempt classification
-    int         rank                 = 1;      // rank for IQ collection tasks
+    double      guard_band_fraction  = 0.1;
+    double      snr_threshold_db     = 5.0;
+    int         rank                 = 1;
+    OnnxConfig  onnx;               // optional ML fallback path
 };
 
 struct AppConfig {
