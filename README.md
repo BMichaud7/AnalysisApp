@@ -13,6 +13,82 @@ SdrResourceManager ──UDP IQ──► AnalysisApp ──AMQP──► rf.anal
                   OnnxClassifier (optional — RadioML-trained CNN)
 ```
 
+## Supported Modulations & Protocols
+
+### Analog modulations
+
+| ID | Description |
+|---|---|
+| `FM_WB` | FM Broadcast — deviation > 50 kHz |
+| `FM_NB` | Narrow-band FM — land mobile, PMR |
+| `AM_DSB_LC` | AM double-sideband with carrier |
+| `AM_DSB_SC` | AM double-sideband suppressed carrier |
+| `SSB_USB` / `SSB_LSB` | Single sideband — HF voice |
+| `PM` | Phase modulation |
+| `CW` | Morse / OOK burst |
+
+### Digital modulations
+
+| ID | Description |
+|---|---|
+| `BPSK` | Binary PSK — GPS, satellite links |
+| `QPSK` | Quad PSK — DVB, Iridium, Meteor-M |
+| `8PSK` | 8-phase PSK — DVB-S2, APCO P25 |
+| `QAM16` / `QAM32` / `QAM64` / `QAM256` | QAM — cable, LTE downlink |
+| `FSK` | Binary / M-ary FSK — POCSAG, AIS |
+| `MSK/GMSK` | Minimum shift keying — GSM, Bluetooth |
+| `OFDM` | Multi-carrier — LTE, Wi-Fi, DAB |
+| `CSS` | Chirp spread spectrum — LoRa |
+| `FHSS` | Frequency hopping — Bluetooth Classic |
+| `M-ASK/OOK` | Amplitude shift keying — TPMS, key fobs |
+
+### Structure detectors
+
+These run on top of modulation and feed into the protocol mapper:
+
+- **Burst / TDMA** — duty-cycle and period estimation
+- **FHSS** — hop-rate detection from centroid variance
+- **OFDM cyclic-prefix** — FFT-size and CP-ratio estimation
+- **Chirp** — linear frequency sweep rate (CSS / FMCW radar)
+
+### Protocol hypotheses (59 entries)
+
+Matched by centre frequency, modulation, bandwidth, and structure flags:
+
+| Category | Systems |
+|---|---|
+| Broadcast | FM Broadcast, AM Broadcast, DAB, DVB-T |
+| Aviation | VHF voice, ADS-B (1090 MHz), ACARS, VOR/ILS, ATIS |
+| Marine | AIS (161/162 MHz), DSC, Marine VHF |
+| Amateur | SSB HF, WSPR, FT8, APRS, DMR, D-STAR, CW |
+| Public safety | TETRA, APCO P25, DMR, MPT1327, NXDN |
+| Cellular | GSM, UMTS/WCDMA, LTE, 5G NR |
+| ISM / IoT | LoRa, Wi-Fi 2.4/5 GHz, Bluetooth, Zigbee, Z-Wave, TPMS, ANT+ |
+| Satellite | GPS L1, NOAA APT, Meteor LRPT, Iridium, Inmarsat AERO |
+| Radar | FMCW 77 GHz, Pulse radar, WSR-88D weather radar |
+
+### Accuracy under hardware impairments
+
+Tested with five hardware profiles (5 noise realisations per signal):
+
+| Profile | Exact accuracy |
+|---|---|
+| PlutoSDR (GPSDO / good IQ) | **100%** |
+| HackRF One | **97%** |
+| RTL-SDR dongle | **97%** |
+| Clean lab | **91%** |
+| Over-the-Air (multipath) | 71% — needs channel equalizer for PSK |
+
+Signals tested: BPSK, QPSK, FM_NB, AM_DSB_LC, OFDM, FSK, CSS/LoRa.
+SNR floor: classifier requires > 10 dB for reliable results.
+
+**Known limitation**: BPSK and QPSK under severe phase noise or multipath
+require the ML/ONNX path (`-DWITH_ONNX=ON`) for robust classification.
+The rule-based path uses windowed cumulants + instantaneous-frequency kurtosis
+which recovers PSK up to RTL-SDR-class phase noise but not deep multipath fading.
+
+---
+
 ## System Requirements
 
 | Dependency | Version | CentOS/RHEL | Ubuntu |
