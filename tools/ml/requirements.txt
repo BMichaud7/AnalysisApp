@@ -9,3 +9,8 @@ tqdm>=4.66
 matplotlib>=3.7
 pandas>=2.0
 scikit-learn>=1.3
+# Optional: Kaggle dataset downloads
+kaggle>=1.6
+# Optional: HuggingFace dataset integration
+datasets>=2.18
+huggingface-hub>=0.22

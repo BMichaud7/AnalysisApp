@@ -1,18 +1,36 @@
 #!/usr/bin/env python3
 """
-Train an AMR classifier on RadioML 2016.10a or 2018.01a.
+Train an AMR classifier on any supported dataset.
 
-Usage:
-    python train.py --data  /path/to/RML2016.10a.hdf5 \
-                   --model  resnet \
-                   --epochs 50 \
-                   --out    models/radioml2016_resnet.onnx
+── Quick start (no downloads needed) ─────────────────────────────────────────
+    # 1. Generate synthetic training data (~2 min, 13 mods × 26 SNRs × 200 = 67 600 examples)
+    python -m datasets generate --out data/synthetic.npz --n 200
 
-    python train.py --data  /path/to/RML2018.01a.hdf5 \
-                   --model  fusion \
-                   --epochs 100 \
-                   --cuda \
-                   --out    models/radioml2018_fusion.onnx
+    # 2. Train
+    python train.py --npz data/synthetic.npz --model resnet --epochs 30 \
+                    --out models/synthetic_resnet.onnx
+
+── RadioML datasets (requires Kaggle account) ────────────────────────────────
+    python -m datasets download radioml2016 --dest data/
+    python -m datasets download radioml2018 --dest data/
+
+    python train.py --data data/RML2016.10a.hdf5  --version 2016 \
+                    --model resnet --epochs 50 \
+                    --out models/radioml2016_resnet.onnx
+
+    python train.py --data data/RML2018.01A_dict.hdf5 --version 2018 \
+                    --model fusion --epochs 100 --cuda \
+                    --out models/radioml2018_fusion.onnx
+
+── HuggingFace datasets ──────────────────────────────────────────────────────
+    python train.py --hf-dataset username/radio-amr --model resnet --epochs 50 \
+                    --out models/hf_resnet.onnx
+
+── Mix multiple sources ──────────────────────────────────────────────────────
+    python train.py --npz data/synthetic.npz \
+                    --data data/RML2016.10a.hdf5 --version 2016 \
+                    --model resnet --epochs 50 \
+                    --out models/combined_resnet.onnx
 
 After training the ONNX model can be dropped into AnalysisApp and loaded
 by the C++ OnnxClassifier (include/OnnxClassifier.hpp).
@@ -32,44 +50,99 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "test_harness"))
-from datasets import load_radioml_2016, load_radioml_2018, RADIOML_2016_MODS, RADIOML_2018_MODS
+from datasets import (
+    load_radioml_2016, load_radioml_2018,
+    RADIOML_2016_MODS, RADIOML_2018_MODS,
+    generate_synthetic, save_synthetic_npz,
+    load_numpy_npz, load_hf_dataset,
+    SYNTHETIC_MODS, IqSample, normalise,
+)
 from model import RadioCNN, RadioResNet, RadioFusion, export_onnx
 
 
 # ── Dataset builders ──────────────────────────────────────────────────────────
 
-def build_radioml_tensors(path: str,
-                           version: str = "2016",
-                           snr_min: float = -20) \
-        -> tuple[torch.Tensor, torch.Tensor, list[str]]:
+def samples_to_tensors(samples: list[IqSample],
+                       class_names: list[str] | None = None
+                       ) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
     """
-    Returns (X, y, class_names) where X is (N, 2, L) float32 and y is (N,) int64.
+    Convert a list of IqSample into (X, y, class_names).
+    X: (N, 2, L) float32   y: (N,) int64
     """
-    if version == "2016":
-        samples    = load_radioml_2016(path, snr_min_db=snr_min, max_per_class=10000)
-        class_names = RADIOML_2016_MODS
-    else:
-        samples    = load_radioml_2018(path, snr_min_db=snr_min, max_per_class=5000)
-        class_names = RADIOML_2018_MODS
+    if class_names is None:
+        class_names = sorted(set(s.ground_truth for s in samples))
 
-    # Build label map
     label_map = {m: i for i, m in enumerate(class_names)}
-
     X_list, y_list = [], []
     for s in samples:
-        iq = s.iq
-        I  = iq.real.astype(np.float32)
-        Q  = iq.imag.astype(np.float32)
-        x  = np.stack([I, Q], axis=0)   # (2, L)
         label = label_map.get(s.ground_truth)
         if label is None:
             continue
-        X_list.append(x)
+        iq = normalise(s.iq)
+        X_list.append(np.stack([iq.real, iq.imag], axis=0).astype(np.float32))
         y_list.append(label)
 
     X = torch.from_numpy(np.stack(X_list, axis=0))
     y = torch.tensor(y_list, dtype=torch.long)
     return X, y, class_names
+
+
+def build_tensors(args) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
+    """Load all requested sources and merge into a single tensor dataset."""
+    all_samples: list[IqSample] = []
+    class_names: list[str] | None = None
+
+    # RadioML HDF5
+    if args.data:
+        print(f"Loading RadioML {args.version} from {args.data} …")
+        if args.version == "2016":
+            s = load_radioml_2016(args.data, snr_min_db=args.snr_min,
+                                  max_per_class=args.max_per_class)
+            class_names = RADIOML_2016_MODS
+        else:
+            s = load_radioml_2018(args.data, snr_min_db=args.snr_min,
+                                  max_per_class=args.max_per_class)
+            class_names = RADIOML_2018_MODS
+        print(f"  {len(s)} RadioML samples")
+        all_samples.extend(s)
+
+    # Numpy .npz
+    if args.npz:
+        for npz_path in args.npz:
+            print(f"Loading numpy npz: {npz_path} …")
+            s = load_numpy_npz(npz_path, snr_min_db=args.snr_min,
+                               max_per_class=args.max_per_class)
+            print(f"  {len(s)} npz samples")
+            all_samples.extend(s)
+
+    # HuggingFace dataset
+    if args.hf_dataset:
+        print(f"Loading HuggingFace: {args.hf_dataset} …")
+        s = load_hf_dataset(args.hf_dataset, snr_min_db=args.snr_min,
+                            max_per_class=args.max_per_class)
+        all_samples.extend(s)
+
+    # Synthetic generation
+    if args.synthetic:
+        print(f"Generating {args.synthetic} synthetic samples per (mod, SNR) …")
+        s = generate_synthetic(
+            n_per_class=args.synthetic,
+            snr_range=(args.snr_min, 30),
+            sample_len=args.synthetic_len,
+        )
+        print(f"  {len(s)} synthetic samples, {len(SYNTHETIC_MODS)} mods")
+        all_samples.extend(s)
+
+    if not all_samples:
+        raise RuntimeError(
+            "No data loaded. Provide at least one of:\n"
+            "  --data HDF5  --npz FILE  --hf-dataset ID  --synthetic N"
+        )
+
+    print(f"Total samples: {len(all_samples)}")
+    X, y, cn = samples_to_tensors(all_samples, class_names)
+    print(f"  Input shape: {X.shape}  Classes: {len(cn)}")
+    return X, y, cn
 
 
 # ── Training loop ─────────────────────────────────────────────────────────────
@@ -152,22 +225,39 @@ def confusion_report(model:       nn.Module,
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Train AMR CNN on RadioML dataset")
-    ap.add_argument("--data",     required=True, metavar="HDF5",
-                    help="Path to RadioML .hdf5 file")
-    ap.add_argument("--version",  default="2016", choices=["2016","2018"],
-                    help="RadioML version (default 2016)")
-    ap.add_argument("--model",    default="resnet",
+    ap = argparse.ArgumentParser(
+        description="Train AMR CNN — supports RadioML, synthetic, npz, HuggingFace",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # ── Data sources (at least one required) ──────────────────────────────────
+    src = ap.add_argument_group("data sources (use one or more)")
+    src.add_argument("--data",       metavar="HDF5",
+                     help="RadioML .hdf5 file path")
+    src.add_argument("--version",    default="2016", choices=["2016","2018"],
+                     help="RadioML version when using --data (default 2016)")
+    src.add_argument("--npz",        nargs="+", metavar="FILE",
+                     help="One or more .npz files from 'python -m datasets generate'")
+    src.add_argument("--hf-dataset", metavar="ID",
+                     help="HuggingFace dataset ID (e.g. user/radio-amr)")
+    src.add_argument("--synthetic",  type=int, metavar="N",
+                     help="Generate N synthetic examples per (mod, SNR) bucket")
+    src.add_argument("--synthetic-len", type=int, default=1024,
+                     help="Samples per synthetic IQ window (default 1024)")
+
+    # ── Filters ───────────────────────────────────────────────────────────────
+    ap.add_argument("--snr-min",       type=float, default=-20)
+    ap.add_argument("--max-per-class", type=int,   default=10000)
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    ap.add_argument("--model",   default="resnet",
                     choices=["cnn","resnet","fusion"],
                     help="Model architecture (default resnet)")
-    ap.add_argument("--epochs",   type=int, default=50)
-    ap.add_argument("--batch",    type=int, default=256)
-    ap.add_argument("--lr",       type=float, default=1e-3)
-    ap.add_argument("--snr-min",  type=float, default=-20)
-    ap.add_argument("--cuda",     action="store_true",
-                    help="Use CUDA if available")
-    ap.add_argument("--out",      default="models/classifier.onnx",
-                    metavar="ONNX")
+    ap.add_argument("--epochs",  type=int,   default=50)
+    ap.add_argument("--batch",   type=int,   default=256)
+    ap.add_argument("--lr",      type=float, default=1e-3)
+    ap.add_argument("--cuda",    action="store_true")
+    ap.add_argument("--out",     default="models/classifier.onnx", metavar="ONNX")
     args = ap.parse_args()
 
     device = torch.device(
@@ -177,11 +267,8 @@ def main() -> None:
     if args.cuda and not torch.cuda.is_available():
         print("  [warn] CUDA requested but not available, using CPU")
 
-    # ── Load data ─────────────────────────────────────────────────────────────
-    print(f"Loading RadioML {args.version} from {args.data} …")
-    X, y, class_names = build_radioml_tensors(
-        args.data, version=args.version, snr_min=args.snr_min
-    )
+    # ── Load / generate data ──────────────────────────────────────────────────
+    X, y, class_names = build_tensors(args)
     input_len   = X.shape[-1]
     num_classes = len(class_names)
     print(f"  Samples: {len(X)}  Input length: {input_len}  Classes: {num_classes}")
