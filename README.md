@@ -69,23 +69,48 @@ Matched by centre frequency, modulation, bandwidth, and structure flags:
 
 ### Accuracy under hardware impairments
 
-Tested with five hardware profiles (5 noise realisations per signal):
+Tested with five hardware profiles, 5 independent noise realisations per signal
+(rule-based path only, no ONNX model):
 
-| Profile | Exact accuracy |
+| Profile | Exact | Family |
+|---|---|---|
+| PlutoSDR (GPSDO / good IQ) | **100%** | **100%** |
+| HackRF One | **97%** | **97%** |
+| RTL-SDR dongle | **97%** | **100%** |
+| Clean lab | 91% | 91% |
+| Over-the-Air (multipath) | 71% | 71% |
+
+Per-signal breakdown:
+
+| Signal | Clean | RTL-SDR | HackRF | PlutoSDR | OTA |
+|---|---|---|---|---|---|
+| BPSK | 80% | **100%** | 80% | **100%** | 0% |
+| QPSK | 60% | 80% | **100%** | **100%** | 0% |
+| FM_NB | **100%** | **100%** | **100%** | **100%** | **100%** |
+| AM_DSB_LC | **100%** | **100%** | **100%** | **100%** | **100%** |
+| OFDM | **100%** | **100%** | **100%** | **100%** | **100%** |
+| FSK | **100%** | **100%** | **100%** | **100%** | **100%** |
+| CSS/LoRa | **100%** | **100%** | **100%** | **100%** | **100%** |
+
+SNR sensitivity (RTL-SDR impairments + AWGN, 3 realisations × 7 signals):
+
+| SNR | Exact |
 |---|---|
-| PlutoSDR (GPSDO / good IQ) | **100%** |
-| HackRF One | **97%** |
-| RTL-SDR dongle | **97%** |
-| Clean lab | **91%** |
-| Over-the-Air (multipath) | 71% — needs channel equalizer for PSK |
+| −10 dB | 10% |
+| −5 dB | 10% |
+| 0 dB | 10% |
+| 5 dB | 29% |
+| 10 dB | 62% |
+| 15 dB | 81% |
+| 20 dB | 90% |
+| 30 dB | 90% |
 
-Signals tested: BPSK, QPSK, FM_NB, AM_DSB_LC, OFDM, FSK, CSS/LoRa.
-SNR floor: classifier requires > 10 dB for reliable results.
+**Known limitation**: BPSK and QPSK under OTA multipath drop to 0% on the
+rule-based path — this is the gap the ONNX fallback is designed to fill.
+FM/AM/OFDM/FSK/CSS are 100% across all profiles including OTA.
 
-**Known limitation**: BPSK and QPSK under severe phase noise or multipath
-require the ML/ONNX path (`-DWITH_ONNX=ON`) for robust classification.
-The rule-based path uses windowed cumulants + instantaneous-frequency kurtosis
-which recovers PSK up to RTL-SDR-class phase noise but not deep multipath fading.
+Latency: 5–7 ms per classification window (Python harness, single-threaded).
+C++ engine is ~1–3 ms on the same hardware.
 
 ---
 
@@ -288,6 +313,12 @@ Each pod announces its own `POD_IP` to SdrResourceManager; tasks are distributed
 | `engine/fft_size` | `4096` | FFT size for spectral features |
 | `engine/snr_threshold_db` | `5.0` | Minimum SNR to attempt classification |
 | `engine/rank` | `1` | Task priority rank when requesting IQ from SdrResourceManager |
+| `engine/onnx/model_path` | *(empty)* | Path to `.onnx` model file — omit to disable ONNX |
+| `engine/onnx/classes_path` | *(empty)* | Path to `.classes.json` label file |
+| `engine/onnx/use_gpu` | `true` | Try CUDA execution provider, fall back to CPU |
+| `engine/onnx/input_len` | `1024` | IQ samples per inference window |
+| `engine/onnx/fallback_confidence_threshold` | `0.60` | Run ONNX when rule confidence is below this value |
+| `engine/onnx/fallback_on_unknown` | `true` | Always run ONNX when rule-based returns UNKNOWN |
 
 ---
 
@@ -313,6 +344,56 @@ The exported `.onnx` file and companion `.classes.json` are loaded by `OnnxClass
 
 ---
 
+## Classification Path
+
+```
+                    ┌─────────────────────────────┐
+IQ buffer ─────────►│  Rule-based classifier       │ always runs (~1–3 ms)
+                    │  FM / AM / OFDM / FSK / CSS  │
+                    └────────────┬────────────────-┘
+                                 │ rule_confidence
+                    ┌────────────▼────────────────-┐
+                    │  < threshold OR "UNKNOWN"?    │ configurable per XML
+                    └────────────┬────────────────-┘
+                          yes    │    no
+               ┌────────────────┘    └──────────────────────┐
+               ▼                                            ▼
+    ┌─────────────────────┐                    ┌───────────────────────┐
+    │  ONNX classifier    │ (~0.5–2 ms GPU)    │  Rule result used     │
+    │  (RadioML CNN)      │                    │  onnx_used = false    │
+    └─────────┬───────────┘                    └───────────────────────┘
+              │ modulation, onnx_confidence
+              ▼
+    ┌─────────────────────┐
+    │  Protocol mapper    │
+    │  (59-entry DB)      │
+    └─────────────────────┘
+```
+
+Rule confidence thresholds by modulation type:
+
+| Modulation | Rule confidence | Typical ONNX trigger |
+|---|---|---|
+| OFDM, CSS | 0.95 | Never (structural CP/chirp detector) |
+| FHSS | 0.90 | Never (hop detector) |
+| FM_WB/NB | 0.90 | Never |
+| AM, SSB, CW | 0.85 | Never |
+| FSK, MSK | 0.80 | Never |
+| BPSK, QPSK, 8PSK | 0.65 | When threshold > 0.65 |
+| QAM | 0.60 | When threshold > 0.60 |
+| UNKNOWN | 0.00 | Always (if `fallback_on_unknown=true`) |
+
+ONNX results and the rule path that fired are reported in every published JSON:
+```json
+"classification_path": {
+  "rule_confidence": 0.65,
+  "onnx_used": true,
+  "onnx_confidence": 0.91
+}
+```
+
+---
+
 ## Test Harness
 
 Validate the feature extractor and classifier against synthetic signals:
@@ -322,4 +403,17 @@ cd tools/test_harness
 python harness.py
 ```
 
-Supported test signals: BPSK, QPSK, FM_WB, AM_DSB_LC, OFDM, CSS/LoRa, BFSK, AIS.
+Validate against hardware impairment profiles and SNR sweep:
+
+```bash
+# All 5 hardware profiles (Clean, RTL-SDR, HackRF, PlutoSDR, OTA)
+python verify_realworld.py
+
+# Single profile
+python verify_realworld.py --profile rtl_sdr
+
+# Add SNR sweep from −10 to +30 dB
+python verify_realworld.py --stress-snr
+```
+
+Supported test signals: BPSK, QPSK, FM_NB, AM_DSB_LC, OFDM, FSK, CSS/LoRa.
