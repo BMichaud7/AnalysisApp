@@ -295,6 +295,7 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
         cv.wait_for(lk, milliseconds(col_cfg_.analysis_timeout_ms),
                     [&]{ return done; });
     }
+    container.stop();  // unblock the thread if response never arrived
     if (amqp_thread.joinable()) amqp_thread.join();
 
     if (!error_body.empty()) {
