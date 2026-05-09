@@ -164,7 +164,7 @@ private:
 AnalysisService::AnalysisService(const AppConfig& cfg)
     : cfg_(cfg)
     , engine_(cfg.engine)
-    , collector_(cfg.amqp, cfg.collector, cfg.streaming_ip)
+    , collector_(cfg.amqp, cfg.collector, cfg.streaming_ip, cfg.engine.rank)
 {}
 
 AnalysisService::~AnalysisService()

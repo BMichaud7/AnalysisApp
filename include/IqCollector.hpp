@@ -9,7 +9,8 @@ class IqCollector {
 public:
     IqCollector(const AmqpConfig& amqp_cfg,
                 const CollectorConfig& col_cfg,
-                const std::string& local_ip);
+                const std::string& local_ip,
+                int task_rank = 1);
     ~IqCollector();
 
     // Returns CF32 IQ samples (I,Q,I,Q,...) for the requested frequency.
@@ -25,6 +26,8 @@ private:
     CollectorConfig col_cfg_;
     std::string     local_ip_;
     double          last_sr_ = 0;
+
+    int     task_rank_ = 1;
 
     void*  connection_ = nullptr;
     void*  session_    = nullptr;

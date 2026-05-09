@@ -242,10 +242,12 @@ static std::vector<float> receiveIq(int udp_fd, int target_samples, int timeout_
 
 IqCollector::IqCollector(const AmqpConfig& amqp_cfg,
                           const CollectorConfig& col_cfg,
-                          const std::string& local_ip)
+                          const std::string& local_ip,
+                          int task_rank)
     : amqp_cfg_(amqp_cfg)
     , col_cfg_(col_cfg)
     , local_ip_(local_ip)
+    , task_rank_(task_rank)
 {}
 
 IqCollector::~IqCollector() = default;
@@ -263,7 +265,7 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
 
     // Step 1: submit task — no port specified, controller allocates from pool
     std::string req_json = buildTaskRequestJson(
-        request_id, center_freq_hz, bw, sr, dur_ms, local_ip_, /*rank=*/1);
+        request_id, center_freq_hz, bw, sr, dur_ms, local_ip_, task_rank_);
 
     RpcHandler::BrokerCfg bcfg{
         amqp_cfg_.url, amqp_cfg_.username, amqp_cfg_.password,
