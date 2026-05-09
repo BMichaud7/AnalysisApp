@@ -324,6 +324,12 @@ void AnalysisService::publishResult(const AnalysisResult& r)
 
     if (!r.classified) j["reject_reason"] = r.reject_reason;
 
+    // Classification path metadata
+    j["classification_path"]["rule_confidence"] = r.rule_confidence;
+    j["classification_path"]["onnx_used"]       = r.onnx_used;
+    if (r.onnx_used)
+        j["classification_path"]["onnx_confidence"] = r.onnx_confidence;
+
     std::string body = j.dump();
 
     if (amqp_handler_) {

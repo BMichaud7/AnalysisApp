@@ -22,5 +22,18 @@
     <fft_size>4096</fft_size>
     <snr_threshold_db>5.0</snr_threshold_db>
     <rank>1</rank>
+
+    <!-- ONNX ML fallback — remove or omit <model_path> to disable -->
+    <!-- Build with: cmake -DWITH_ONNX=ON -DONNXRUNTIME_ROOT=/opt/onnxruntime-linux-x64-gpu-1.17.3 -->
+    <!--
+    <onnx>
+      <model_path>/opt/models/amr.onnx</model_path>
+      <classes_path>/opt/models/amr.classes.json</classes_path>
+      <use_gpu>true</use_gpu>
+      <input_len>1024</input_len>
+      <fallback_confidence_threshold>0.60</fallback_confidence_threshold>
+      <fallback_on_unknown>true</fallback_on_unknown>
+    </onnx>
+    -->
   </engine>
 </sdr_analysis>

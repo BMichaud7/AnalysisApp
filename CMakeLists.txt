@@ -124,6 +124,7 @@ set(ANALYSIS_SOURCES
     src/ModulationClassifier.cpp
     src/ProtocolMapper.cpp
     src/AnalysisEngine.cpp
+    src/OnnxClassifier.cpp
     src/IqCollector.cpp
     src/AnalysisService.cpp
 )
