@@ -1,9 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AnalysisApp integration-test config -->
 <sdr_analysis>
   <scanner_id>analysis-0</scanner_id>
-  <streaming_ip>10.89.0.10</streaming_ip>
+  <streaming_ip>127.0.0.1</streaming_ip>
 
   <amqp>
-    <url>amqp://10.89.0.2:5672</url>
+    <url>amqp://localhost:5672</url>
     <username>sdr_ctrl</username>
     <password>test_password</password>
     <detections_topic>rf.detections</detections_topic>
@@ -14,26 +16,13 @@
 
   <collector>
     <analysis_sample_rate_sps>2000000</analysis_sample_rate_sps>
-    <collect_samples>1000000</collect_samples>
+    <collect_samples>200000</collect_samples>
     <analysis_timeout_ms>5000</analysis_timeout_ms>
   </collector>
 
   <engine>
     <fft_size>4096</fft_size>
     <snr_threshold_db>5.0</snr_threshold_db>
-    <rank>1</rank>
-
-    <!-- ONNX ML fallback — remove or omit <model_path> to disable -->
-    <!-- Build with: cmake -DWITH_ONNX=ON -DONNXRUNTIME_ROOT=/opt/onnxruntime-linux-x64-gpu-1.17.3 -->
-    <!--
-    <onnx>
-      <model_path>/opt/models/amr.onnx</model_path>
-      <classes_path>/opt/models/amr.classes.json</classes_path>
-      <use_gpu>true</use_gpu>
-      <input_len>1024</input_len>
-      <fallback_confidence_threshold>0.60</fallback_confidence_threshold>
-      <fallback_on_unknown>true</fallback_on_unknown>
-    </onnx>
-    -->
+    <rank>2</rank>
   </engine>
 </sdr_analysis>

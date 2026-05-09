@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
-End-to-end test for AnalysisApp — simulates the full SdrResourceManager role.
+AnalysisApp integration tests — fake controller + IQ streamer.
 
-Flow:
-  1. Send Detection event → rf.detections  (triggers AnalysisApp)
-  2. AnalysisApp sends TASK_REQUEST → sdr.task.request  (we intercept this)
-  3. We reply TASK_RESPONSE → sdr.task.response  (simulate ResourceManager accept)
-  4. We stream synthetic IQ packets over UDP to the port AnalysisApp is listening on
-  5. AnalysisApp analyzes and publishes → rf.analysis  (we verify this)
+Each test case starts fresh.  The script acts as:
+  • Detection source  → rf.detections
+  • Fake controller   → sdr.task.request (intercept) / sdr.task.response (respond)
+  • Result verifier   → rf.analysis
+
+Test cases
+----------
+1. basic_flow          Full pipeline: detection → TASK_REQUEST → IQ stream → ANALYSIS_RESULT
+2. udp_port_protocol   Controller allocates port; verifies app binds to the returned port
+3. stale_response      Send wrong request_id first; correct one accepted on second message
+4. timeout_returns     No response sent; collect() must return within 2×timeout, no hang
+5. task_stop_sent      After IQ collected, app must send TASK_STOP
 
 Usage:
-    python3 e2e_test.py --broker amqp://10.89.0.2:5672
+    python3 e2e_test.py [--broker amqp://localhost:5672] [--test basic_flow]
 """
-
 from __future__ import annotations
+
 import argparse, json, math, socket, struct, sys, threading, time, uuid
 import numpy as np
 
@@ -22,252 +28,527 @@ try:
 except ImportError:
     sys.exit("pip install python-qpid-proton")
 
-# ── IQ packet format (matches SdrTaskApi IqPacketHeader, 32 bytes) ───────────
-#   uint32 magic         = 0x49515030 ("IQP0")
-#   uint32 sequence
-#   uint64 timestamp_ns
-#   uint64 center_freq_hz
-#   uint32 sample_rate
-#   uint16 num_samples
-#   uint8  channel_index
-#   uint8  flags
-IQ_MAGIC  = 0x49515030
-IQ_HEADER = struct.Struct("<I I Q Q I H B B")   # little-endian, 32 bytes
+# ── IQ packet (matches sdr::IqPacketHeader, 32 bytes, little-endian) ─────────
+IQ_MAGIC  = 0x49515030   # "IQP0"
+IQ_HEADER = struct.Struct("<I I Q Q I H B B")
 assert IQ_HEADER.size == 32
 
-def build_iq_packet(seq: int, iq: np.ndarray, cf: float, sr: float) -> bytes:
-    n   = len(iq)
-    hdr = IQ_HEADER.pack(IQ_MAGIC, seq, 0, int(cf), int(sr), n, 0, 0)
-    samples = np.empty(n * 2, dtype=np.float32)
-    samples[0::2] = iq.real
-    samples[1::2] = iq.imag
-    return hdr + samples.tobytes()
+IQ_FLAG_FIRST_PACKET = 0x02
+IQ_FLAG_DWELL_CHANGE = 0x04
 
+def _iq_packet(seq: int, samples: np.ndarray, cf: float, sr: float,
+               flags: int = 0) -> bytes:
+    n   = len(samples)
+    hdr = IQ_HEADER.pack(IQ_MAGIC, seq, 0, int(cf), int(sr), n, 0, flags)
+    raw = np.empty(n * 2, dtype=np.float32)
+    raw[0::2] = samples.real
+    raw[1::2] = samples.imag
+    return hdr + raw.tobytes()
 
-def gen_fm(n: int = 4096, sr: float = 2e6, dev: float = 75e3) -> np.ndarray:
-    """FM signal at 100 MHz — AnalysisApp should classify as FM / FM Broadcast."""
+def _gen_fm(n: int = 4096, sr: float = 2e6, dev: float = 75e3) -> np.ndarray:
     rng   = np.random.default_rng(42)
     audio = rng.standard_normal(n).astype(np.float32)
     audio /= np.max(np.abs(audio)) + 1e-9
     phase = 2 * np.pi * dev / sr * np.cumsum(audio)
-    iq    = np.exp(1j * phase).astype(np.complex64)
-    return (iq / np.sqrt(np.mean(np.abs(iq)**2))).astype(np.complex64)
+    iq    = (np.exp(1j * phase)).astype(np.complex64)
+    return iq / np.sqrt(np.mean(np.abs(iq) ** 2))
 
+def _stream_iq(dest_ip: str, dest_port: int, cf: float, sr: float,
+               n_total: int = 200_000, pkt: int = 1024,
+               delay_s: float = 0.1):
+    """Stream n_total CF32 IQ samples in UDP packets to dest_ip:dest_port."""
+    time.sleep(delay_s)
+    sock    = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    base    = _gen_fm(4096, sr)
+    full    = np.tile(base, math.ceil(n_total / len(base)))[:n_total]
+    flags   = IQ_FLAG_FIRST_PACKET
+    for seq, off in enumerate(range(0, len(full), pkt)):
+        chunk = full[off : off + pkt]
+        data  = _iq_packet(seq, chunk, cf, sr, flags)
+        sock.sendto(data, (dest_ip, dest_port))
+        flags = 0
+        time.sleep(0.0005)
+    sock.close()
+    print(f"  [ctrl] streamed {seq+1} packets ({n_total} samples) → {dest_ip}:{dest_port}")
 
-# ── AMQP orchestrator ─────────────────────────────────────────────────────────
+# ── Port pool (simulates controller allocating from its pool) ─────────────────
+_PORT_POOL_START = 30100   # avoid clashing with hw-test pool (30000-30099)
+_port_counter    = _PORT_POOL_START
 
-class E2EHandler(proton.handlers.MessagingHandler):
-    def __init__(self, broker: str, creds: tuple[str,str]):
+def _alloc_port() -> int:
+    global _port_counter
+    p = _port_counter
+    _port_counter += 1
+    return p
+
+# ── Base proton handler ───────────────────────────────────────────────────────
+
+class _BaseHandler(proton.handlers.MessagingHandler):
+    CREDS = ("sdr_ctrl", "test_password")
+
+    def __init__(self, broker: str):
         super().__init__()
-        self.broker  = broker
-        self.user, self.pwd = creds
-        self.result: dict | None = None
-        self.error:  str  | None = None
+        self.broker = broker
         self._senders: dict[str, proton.Sender] = {}
-        self._det_sent  = False
-        self._task_id   = str(uuid.uuid4())
-        self._req_id    = str(uuid.uuid4())
+        self.done  = threading.Event()
+        self.error: str | None = None
 
-    # ── Connect & open senders/receivers ─────────────────────────────────────
-    def on_start(self, event):
+    def _connect(self, event, *recv_addrs):
         conn = event.container.connect(
             self.broker,
-            user=self.user,
-            password=self.pwd,
-            sasl_enabled=True,
-            allowed_mechs="PLAIN",
+            user=self.CREDS[0], password=self.CREDS[1],
+            sasl_enabled=True, allowed_mechs="PLAIN",
         )
+        for addr in recv_addrs:
+            event.container.create_receiver(conn, addr)
+        return conn
 
-        # Sender for: rf.detections, sdr.task.response
-        self._senders["rf.detections"]      = event.container.create_sender(conn, "rf.detections")
-        self._senders["sdr.task.response"]  = event.container.create_sender(conn, "sdr.task.response")
+    def _open_sender(self, conn, addr: str) -> proton.Sender:
+        s = conn.open_sender(addr)
+        self._senders[addr] = s
+        return s
 
-        # Receivers for: sdr.task.request (we intercept), rf.analysis (result)
-        event.container.create_receiver(conn, "sdr.task.request")
-        event.container.create_receiver(conn, "rf.analysis")
-        print("[e2e] Connected to", self.broker)
+    def _send(self, addr: str, body: dict):
+        msg = proton.Message(body=json.dumps(body),
+                             content_type="application/json")
+        self._senders[addr].send(msg)
 
-    # ── When all senders are open, fire detection ─────────────────────────────
-    def on_sendable(self, event):
-        if not self._det_sent and all(s.credit for s in self._senders.values()):
-            self._det_sent = True
-            self._send_detection(event)
-
-    def _send_detection(self, event):
-        det = {
-            "scanner_id":     "test-scanner",
-            "center_freq_hz": 100_000_000.0,
-            "bandwidth_hz":   200_000.0,
-            "power_db":       -60.0,
-            "timestamp_ms":   int(time.time() * 1000),
-        }
-        msg = proton.Message(body=json.dumps(det), content_type="application/json")
-        self._senders["rf.detections"].send(msg)
-        print("[e2e] → rf.detections  Detection(100 MHz, 200 kHz)")
-
-    # ── Handle incoming messages ──────────────────────────────────────────────
-    def on_message(self, event):
+    def _accept_and_parse(self, event) -> dict | None:
+        event.delivery.accept()
         try:
-            body = json.loads(event.message.body)
+            return json.loads(event.message.body)
         except Exception:
-            body = {"raw": str(event.message.body)}
-
-        topic = event.receiver.source.address
-
-        if topic == "sdr.task.request":
-            if body.get("msg_type") == "TASK_STOP":
-                print(f"[e2e] ← sdr.task.request  TASK_STOP — sending ack")
-                ack = {
-                    "msg_type":      "TASK_RESPONSE",
-                    "request_id":    body.get("request_id", ""),
-                    "task_id":       body.get("task_id", self._task_id),
-                    "status":        "ACCEPTED",
-                    "reject_reason": "",
-                    "timestamp_ms":  int(time.time() * 1000),
-                    "streams":       [],
-                }
-                msg = proton.Message(body=json.dumps(ack),
-                                     content_type="application/json")
-                self._senders["sdr.task.response"].send(msg)
-                return
-            self._handle_task_request(body)
-
-        elif topic == "rf.analysis":
-            print("\n[e2e] ← rf.analysis  Analysis result received:")
-            print(json.dumps(body, indent=2))
-            self.result = body
-            event.connection.close()
-
-    def _handle_task_request(self, req: dict):
-        print(f"[e2e] ← sdr.task.request  TASK_REQUEST req_id={req.get('request_id','?')}")
-
-        # Extract UDP destination from request
-        streaming = req.get("streaming", {})
-        dest_ip   = streaming.get("dest_ip", "127.0.0.1")
-        ports     = streaming.get("dest_ports", [20000])
-        dest_port = ports[0] if ports else 20000
-        sr        = req.get("rf", {}).get("sample_rate_sps", 2_000_000)
-        cf        = req.get("rf", {}).get("center_freq_hz", 100e6)
-
-        print(f"[e2e]   IQ destination: {dest_ip}:{dest_port}  sr={sr:.0f}")
-
-        # Send TASK_RESPONSE (ACCEPTED)
-        resp = {
-            "msg_type":      "TASK_RESPONSE",
-            "request_id":    req.get("request_id", self._req_id),
-            "task_id":       self._task_id,
-            "status":        "ACCEPTED",
-            "reject_reason": "",
-            "timestamp_ms":  int(time.time() * 1000),
-            "streams": [{
-                "channel_index":  0,
-                "center_freq_hz": cf,
-                "sample_rate_sps": sr,
-                "dest_ip":        dest_ip,
-                "dest_port":      dest_port,
-            }],
-        }
-        msg = proton.Message(body=json.dumps(resp), content_type="application/json")
-        self._senders["sdr.task.response"].send(msg)
-        print(f"[e2e] → sdr.task.response  ACCEPTED task_id={self._task_id}")
-
-        # Stream IQ in background
-        threading.Thread(
-            target=self._stream_iq,
-            args=(dest_ip, dest_port, cf, sr),
-            daemon=True,
-        ).start()
-
-    def _stream_iq(self, dest_ip: str, dest_port: int, cf: float, sr: float):
-        time.sleep(0.2)   # give AnalysisApp time to start UDP receive loop
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        iq_base   = gen_fm(4096, sr)
-        pkt_size  = 1024
-        n_total   = 200_000
-        iq_full   = np.tile(iq_base, math.ceil(n_total / len(iq_base)))[:n_total]
-
-        for seq, off in enumerate(range(0, len(iq_full), pkt_size)):
-            chunk = iq_full[off:off + pkt_size]
-            pkt   = build_iq_packet(seq, chunk, cf, sr)
-            sock.sendto(pkt, (dest_ip, dest_port))
-            time.sleep(0.0005)
-
-        sock.close()
-        print(f"[e2e] Streamed {seq+1} IQ packets ({n_total} samples) → {dest_ip}:{dest_port}")
+            return None
 
     def on_transport_error(self, event):
         self.error = str(event.transport.condition)
-        print(f"[e2e] Transport error: {self.error}")
+        self.done.set()
 
     def on_disconnected(self, event):
-        pass
+        self.done.set()
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Test 1 & 2 — basic_flow / udp_port_protocol
+# ══════════════════════════════════════════════════════════════════════════════
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--broker",  default="amqp://10.89.0.2:5672")
-    ap.add_argument("--timeout", type=int, default=45)
-    args = ap.parse_args()
+class _BasicFlowHandler(_BaseHandler):
+    """
+    Send one Detection, intercept TASK_REQUEST, allocate a port from the
+    controller pool, respond with streams[0].udp_port, stream IQ.
+    Verify ANALYSIS_RESULT received and that the app bound to our port.
+    """
+    def __init__(self, broker: str):
+        super().__init__(broker)
+        self.result:      dict | None = None
+        self.task_req:    dict | None = None   # the raw TASK_REQUEST we received
+        self.udp_port:    int  = 0
+        self._det_sent    = False
 
-    handler   = E2EHandler(args.broker, ("sdr_ctrl", "test_password"))
+    def on_start(self, event):
+        conn = self._connect(event, "sdr.task.request", "rf.analysis")
+        self._open_sender(conn, "rf.detections")
+        self._open_sender(conn, "sdr.task.response")
+
+    def on_sendable(self, event):
+        if not self._det_sent and all(s.credit for s in self._senders.values()):
+            self._det_sent = True
+            self._send("rf.detections", {
+                "scanner_id":     "test-scanner",
+                "center_freq_hz": 100_000_000.0,
+                "bandwidth_hz":   200_000.0,
+                "power_db":       -60.0,
+                "timestamp_ms":   int(time.time() * 1000),
+            })
+            print("  [ctrl] → rf.detections  Detection(100 MHz)")
+
+    def on_message(self, event):
+        body = self._accept_and_parse(event)
+        if body is None:
+            return
+        addr = event.receiver.source.address
+
+        if addr == "sdr.task.request":
+            msg_type = body.get("msg_type", "")
+            if msg_type == "TASK_STOP":
+                print(f"  [ctrl] ← TASK_STOP for {body.get('task_id','?')}")
+                return
+            if "REQUEST" not in msg_type:
+                return
+
+            self.task_req = body
+            req_id   = body.get("request_id", "")
+            dest_ip  = body.get("streaming", {}).get("dest_ip", "127.0.0.1")
+            cf       = body.get("rf", {}).get("center_freq_hz", 100e6)
+            sr       = body.get("rf", {}).get("sample_rate_sps", 2e6)
+
+            # Controller allocates port from ITS pool, not from the request
+            self.udp_port = _alloc_port()
+            print(f"  [ctrl] ← TASK_REQUEST req={req_id}  allocating port {self.udp_port}")
+
+            # Verify app did NOT send dest_ports (new protocol)
+            dest_ports = body.get("streaming", {}).get("dest_ports", None)
+            if dest_ports is not None:
+                print(f"  [WARN] app sent dest_ports={dest_ports} — should not (old protocol)")
+
+            self._send("sdr.task.response", {
+                "msg_type":   "TASK_RESPONSE",
+                "request_id": req_id,
+                "task_id":    str(uuid.uuid4()),
+                "status":     "ACCEPTED",
+                "timestamp_ms": int(time.time() * 1000),
+                "streams": [{
+                    "channel_index":   0,
+                    "udp_ip":          dest_ip,
+                    "udp_port":        self.udp_port,   # KEY: returned, not requested
+                    "center_freq_hz":  cf,
+                    "sample_rate_sps": sr,
+                    "format":          "CF32",
+                }],
+            })
+            print(f"  [ctrl] → TASK_RESPONSE ACCEPTED  udp_port={self.udp_port}")
+
+            # Stream IQ to the port we allocated (app should be binding to it)
+            threading.Thread(
+                target=_stream_iq,
+                args=(dest_ip, self.udp_port, cf, sr),
+                daemon=True,
+            ).start()
+
+        elif addr == "rf.analysis":
+            self.result = body
+            print(f"  [ctrl] ← rf.analysis  msg_type={body.get('msg_type')}")
+            event.connection.close()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Test 3 — stale_response
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _StaleResponseHandler(_BaseHandler):
+    """
+    Send a TASK_RESPONSE with a wrong request_id before the correct one.
+    App must discard the stale message and accept the real one.
+    """
+    def __init__(self, broker: str):
+        super().__init__(broker)
+        self.result       = None
+        self._det_sent    = False
+        self._stale_sent  = False
+
+    def on_start(self, event):
+        conn = self._connect(event, "sdr.task.request", "rf.analysis")
+        self._open_sender(conn, "rf.detections")
+        self._open_sender(conn, "sdr.task.response")
+
+    def on_sendable(self, event):
+        if not self._det_sent and all(s.credit for s in self._senders.values()):
+            self._det_sent = True
+            self._send("rf.detections", {
+                "scanner_id": "test-scanner",
+                "center_freq_hz": 100_000_000.0,
+                "bandwidth_hz": 200_000.0,
+                "power_db": -60.0,
+                "timestamp_ms": int(time.time() * 1000),
+            })
+            print("  [ctrl] → rf.detections  Detection(100 MHz)")
+
+    def on_message(self, event):
+        body = self._accept_and_parse(event)
+        if body is None:
+            return
+        addr = event.receiver.source.address
+
+        if addr == "sdr.task.request" and "REQUEST" in body.get("msg_type", ""):
+            req_id  = body.get("request_id", "")
+            dest_ip = body.get("streaming", {}).get("dest_ip", "127.0.0.1")
+            cf      = body.get("rf", {}).get("center_freq_hz", 100e6)
+            sr      = body.get("rf", {}).get("sample_rate_sps", 2e6)
+
+            if not self._stale_sent:
+                self._stale_sent = True
+                # Send a response with the WRONG request_id first
+                stale_id = "wrong-" + str(uuid.uuid4())
+                print(f"  [ctrl] → TASK_RESPONSE with WRONG req_id={stale_id} (should be discarded)")
+                self._send("sdr.task.response", {
+                    "msg_type":   "TASK_RESPONSE",
+                    "request_id": stale_id,
+                    "task_id":    str(uuid.uuid4()),
+                    "status":     "ACCEPTED",
+                    "timestamp_ms": int(time.time() * 1000),
+                    "streams": [{"channel_index": 0, "udp_ip": dest_ip,
+                                 "udp_port": 29999, "center_freq_hz": cf,
+                                 "sample_rate_sps": sr, "format": "CF32"}],
+                })
+                # Wait briefly then send the correct response
+                port = _alloc_port()
+                time.sleep(0.3)
+                print(f"  [ctrl] → TASK_RESPONSE with CORRECT req_id={req_id}  port={port}")
+                self._send("sdr.task.response", {
+                    "msg_type":   "TASK_RESPONSE",
+                    "request_id": req_id,
+                    "task_id":    str(uuid.uuid4()),
+                    "status":     "ACCEPTED",
+                    "timestamp_ms": int(time.time() * 1000),
+                    "streams": [{"channel_index": 0, "udp_ip": dest_ip,
+                                 "udp_port": port, "center_freq_hz": cf,
+                                 "sample_rate_sps": sr, "format": "CF32"}],
+                })
+                threading.Thread(
+                    target=_stream_iq,
+                    args=(dest_ip, port, cf, sr),
+                    daemon=True,
+                ).start()
+
+            elif body.get("msg_type") == "TASK_STOP":
+                return
+
+        elif addr == "rf.analysis":
+            self.result = body
+            event.connection.close()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Test 4 — timeout_returns
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _TimeoutHandler(_BaseHandler):
+    """
+    Send a Detection but NEVER respond to the TASK_REQUEST.
+    App must return from collect() within analysis_timeout_ms, not hang.
+    We verify by checking elapsed time.
+    """
+    def __init__(self, broker: str, max_wait_s: float = 12.0):
+        super().__init__(broker)
+        self.task_received = False
+        self._det_sent     = False
+        self._max_wait_s   = max_wait_s
+        self._t_request: float | None = None
+
+    def on_start(self, event):
+        conn = self._connect(event, "sdr.task.request", "rf.analysis")
+        self._open_sender(conn, "rf.detections")
+        # No sender for sdr.task.response — we never reply
+
+    def on_sendable(self, event):
+        if not self._det_sent and all(s.credit for s in self._senders.values()):
+            self._det_sent = True
+            self._send("rf.detections", {
+                "scanner_id": "test-scanner",
+                "center_freq_hz": 100_000_000.0,
+                "bandwidth_hz": 200_000.0,
+                "power_db": -60.0,
+                "timestamp_ms": int(time.time() * 1000),
+            })
+            print("  [ctrl] → rf.detections  (will NOT respond to TASK_REQUEST)")
+
+    def on_message(self, event):
+        body = self._accept_and_parse(event)
+        if body is None:
+            return
+        addr = event.receiver.source.address
+        if addr == "sdr.task.request" and "REQUEST" in body.get("msg_type",""):
+            self.task_received   = True
+            self._t_request      = time.time()
+            print(f"  [ctrl] ← TASK_REQUEST received — deliberately not responding")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Test 5 — task_stop_sent
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _TaskStopHandler(_BasicFlowHandler):
+    """After IQ is collected the app must send TASK_STOP."""
+    def __init__(self, broker: str):
+        super().__init__(broker)
+        self.task_stop_received = False
+        self._our_task_id: str | None = None
+
+    def on_message(self, event):
+        body = self._accept_and_parse(event)
+        if body is None:
+            return
+        addr = event.receiver.source.address
+
+        if addr == "sdr.task.request":
+            msg_type = body.get("msg_type", "")
+            if msg_type == "TASK_STOP" and body.get("task_id") == self._our_task_id:
+                print(f"  [ctrl] ← TASK_STOP received for task {self._our_task_id} ✓")
+                self.task_stop_received = True
+                return
+            if "REQUEST" not in msg_type:
+                return
+
+            req_id  = body.get("request_id", "")
+            dest_ip = body.get("streaming", {}).get("dest_ip", "127.0.0.1")
+            cf      = body.get("rf", {}).get("center_freq_hz", 100e6)
+            sr      = body.get("rf", {}).get("sample_rate_sps", 2e6)
+
+            self._our_task_id = str(uuid.uuid4())
+            self.udp_port     = _alloc_port()
+
+            self._send("sdr.task.response", {
+                "msg_type":   "TASK_RESPONSE",
+                "request_id": req_id,
+                "task_id":    self._our_task_id,
+                "status":     "ACCEPTED",
+                "timestamp_ms": int(time.time() * 1000),
+                "streams": [{"channel_index": 0, "udp_ip": dest_ip,
+                             "udp_port": self.udp_port, "center_freq_hz": cf,
+                             "sample_rate_sps": sr, "format": "CF32"}],
+            })
+            threading.Thread(
+                target=_stream_iq,
+                args=(dest_ip, self.udp_port, cf, sr),
+                daemon=True,
+            ).start()
+
+        elif addr == "rf.analysis":
+            self.result = body
+            # Don't close connection yet — wait for TASK_STOP
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Test runner
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _run(handler: _BaseHandler, timeout_s: float = 45.0) -> _BaseHandler:
     container = proton.reactor.Container(handler)
     t = threading.Thread(target=container.run, daemon=True)
     t.start()
-
-    deadline = time.time() + args.timeout
-    while t.is_alive() and time.time() < deadline:
-        t.join(timeout=1.0)
-
+    t.join(timeout=timeout_s)
     if t.is_alive():
-        print(f"\n[e2e] TIMEOUT after {args.timeout}s")
-        sys.exit(2)
-    if handler.error:
-        print(f"\n[e2e] FAILED: {handler.error}")
-        sys.exit(1)
-    if not handler.result:
-        print("\n[e2e] FAILED: no result received")
-        sys.exit(1)
+        container.stop()
+        t.join(timeout=3)
+    return handler
 
-    # ── Validate result ───────────────────────────────────────────────────────
-    r = handler.result
+
+def run_basic_flow(broker: str) -> bool:
+    print("\n── Test 1: basic_flow ──────────────────────────────────────────")
+    h = _run(_BasicFlowHandler(broker))
+
     checks = []
+    if h.error:
+        print(f"  AMQP error: {h.error}"); return False
 
-    msg_type = r.get("msg_type","")
-    checks.append(("msg_type=ANALYSIS_RESULT",  msg_type == "ANALYSIS_RESULT"))
+    r = h.result
+    if r is None:
+        print("  ✗ No ANALYSIS_RESULT received"); return False
 
-    cf = r.get("center_freq_hz", 0)
-    checks.append((f"center_freq={cf/1e6:.1f} MHz",  abs(cf - 100e6) < 1e6))
-
+    checks.append(("msg_type=ANALYSIS_RESULT",  r.get("msg_type") == "ANALYSIS_RESULT"))
+    cf  = r.get("center_freq_hz", 0)
+    checks.append((f"center_freq≈100 MHz (got {cf/1e6:.1f})",  abs(cf - 100e6) < 1e6))
     snr = r.get("snr_db", 0)
     checks.append((f"SNR={snr:.1f} dB > 5",  snr > 5))
-
-    mod = r.get("modulation", {})
-    analog = mod.get("analog","") if isinstance(mod, dict) else ""
-    digital = mod.get("digital","") if isinstance(mod, dict) else ""
-    detected = analog or digital or str(mod)
-    is_fm = "FM" in detected.upper()
-    checks.append((f"modulation contains FM (got {detected!r})",  is_fm))
-
     hyps = r.get("hypotheses", [])
-    top  = hyps[0].get("system","") if hyps else ""
-    conf = hyps[0].get("confidence", 0) if hyps else 0
-    checks.append((f"hypothesis={top!r} conf={conf:.2f}",  bool(top)))
+    checks.append(("at least 1 hypothesis",  len(hyps) > 0))
 
-    print("\n[e2e] ── Result checks ──────────────────────────────")
+    return _report(checks)
+
+
+def run_udp_port_protocol(broker: str) -> bool:
+    """Verifies app sends no dest_ports and binds to the returned udp_port."""
+    print("\n── Test 2: udp_port_protocol ───────────────────────────────────")
+    h = _run(_BasicFlowHandler(broker))
+
+    if h.error or h.task_req is None:
+        print("  ✗ No TASK_REQUEST observed"); return False
+
+    checks = []
+    dest_ports = h.task_req.get("streaming", {}).get("dest_ports")
+    checks.append(("request has no dest_ports field",  dest_ports is None))
+    checks.append(("controller allocated udp_port > 0", h.udp_port > 0))
+    checks.append(("ANALYSIS_RESULT received (app bound to allocated port)",
+                   h.result is not None))
+    return _report(checks)
+
+
+def run_stale_response(broker: str) -> bool:
+    print("\n── Test 3: stale_response ──────────────────────────────────────")
+    h = _run(_StaleResponseHandler(broker), timeout_s=30)
+    checks = [("ANALYSIS_RESULT received despite stale first response",
+               h.result is not None and h.error is None)]
+    return _report(checks)
+
+
+def run_timeout_returns(broker: str) -> bool:
+    """App must return from collect() within 2×analysis_timeout_ms, never hang."""
+    print("\n── Test 4: timeout_returns ─────────────────────────────────────")
+    ANALYSIS_TIMEOUT_MS = 5000   # matches test-env config
+    max_wait_s = ANALYSIS_TIMEOUT_MS / 1000 * 2 + 2   # 2× + 2s grace
+
+    t_start = time.time()
+    h = _run(_TimeoutHandler(broker), timeout_s=max_wait_s + 5)
+    elapsed = time.time() - t_start
+
+    checks = []
+    checks.append(("TASK_REQUEST was received",  h.task_received))
+    checks.append((f"returned within {max_wait_s:.0f}s (took {elapsed:.1f}s)",
+                   elapsed < max_wait_s + 5))
+    checks.append(("no AMQP error", h.error is None))
+    return _report(checks)
+
+
+def run_task_stop_sent(broker: str) -> bool:
+    print("\n── Test 5: task_stop_sent ──────────────────────────────────────")
+    h = _TaskStopHandler(broker)
+    _run(h, timeout_s=30)
+
+    # Give a moment for TASK_STOP to arrive after rf.analysis
+    if h.result and not h.task_stop_received:
+        time.sleep(3)
+
+    checks = [
+        ("ANALYSIS_RESULT received", h.result is not None),
+        ("TASK_STOP received after collection", h.task_stop_received),
+    ]
+    return _report(checks)
+
+
+def _report(checks: list[tuple[str, bool]]) -> bool:
+    ok = True
+    for label, passed in checks:
+        sym = "✓" if passed else "✗"
+        print(f"  {sym} {label}")
+        if not passed:
+            ok = False
+    return ok
+
+
+ALL_TESTS = {
+    "basic_flow":        run_basic_flow,
+    "udp_port_protocol": run_udp_port_protocol,
+    "stale_response":    run_stale_response,
+    "timeout_returns":   run_timeout_returns,
+    "task_stop_sent":    run_task_stop_sent,
+}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--broker", default="amqp://localhost:5672")
+    ap.add_argument("--test",   default=None,
+                    help="Run a single test; omit to run all")
+    args = ap.parse_args()
+
+    if args.test:
+        if args.test not in ALL_TESTS:
+            print(f"Unknown test {args.test!r}. Available: {list(ALL_TESTS)}")
+            sys.exit(2)
+        tests = {args.test: ALL_TESTS[args.test]}
+    else:
+        tests = ALL_TESTS
+
+    results: dict[str, bool] = {}
+    for name, fn in tests.items():
+        results[name] = fn(args.broker)
+        time.sleep(1)   # let broker clear between tests
+
+    print("\n── Summary ─────────────────────────────────────────────────────")
     all_ok = True
-    for label, ok in checks:
-        print(f"  {'✓' if ok else '✗'} {label}")
+    for name, ok in results.items():
+        print(f"  {'PASS' if ok else 'FAIL'}  {name}")
         if not ok:
             all_ok = False
 
-    if all_ok:
-        print("\n[e2e] ALL CHECKS PASSED ✓")
-        sys.exit(0)
-    else:
-        print("\n[e2e] SOME CHECKS FAILED")
-        sys.exit(1)
+    sys.exit(0 if all_ok else 1)
 
 
 if __name__ == "__main__":

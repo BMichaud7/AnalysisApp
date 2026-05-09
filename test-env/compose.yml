@@ -2,7 +2,6 @@ version: "3.9"
 
 services:
 
-  # ── ActiveMQ Artemis broker ─────────────────────────────────────────────
   broker:
     image: apache/activemq-artemis:2.36.0
     container_name: sdr-broker
@@ -10,30 +9,23 @@ services:
       ARTEMIS_USER: sdr_ctrl
       ARTEMIS_PASSWORD: test_password
     ports:
-      - "5672:5672"    # AMQP
-      - "8161:8161"    # web console
-    networks:
-      - sdr-net
+      - "5672:5672"
+      - "8161:8161"
     healthcheck:
       test: ["CMD", "/var/lib/artemis-instance/bin/artemis", "check", "node", "--up"]
       interval: 5s
       timeout: 10s
       retries: 12
 
-  # ── AnalysisApp ─────────────────────────────────────────────────────────
   analysis:
     image: localhost/sdr-analysis:dev
     container_name: sdr-analysis
     depends_on:
       broker:
         condition: service_healthy
+    # host networking so the fake controller can stream UDP to 127.0.0.1:allocated_port
+    network_mode: host
     volumes:
       - ./config/analysis.xml:/etc/sdr-analysis/analysis.xml:ro
     environment:
       SDR_LOG_LEVEL: debug
-    networks:
-      - sdr-net
-
-networks:
-  sdr-net:
-    driver: bridge
