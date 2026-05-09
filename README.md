@@ -156,6 +156,28 @@ pip install -r tools/ml/requirements.txt   # torch, onnx, onnxruntime-gpu, …
 
 ---
 
+## Testing
+
+Run the 27 unit tests in a container — no broker, SDR, or local deps needed:
+
+```bash
+podman build --target test -t sdr-analysis:test .
+```
+
+The `Containerfile` is multi-stage (CentOS Stream 10). `--target test` builds the binary and runs `ctest` inside the builder, exiting 0 on success.
+
+Tests cover: `FeatureExtractor` (cumulant values, OFDM CP detector, SNR, chirp), `ModulationClassifier` (all modulation branches, PSK discriminants), `ProtocolMapper` (hypothesis ranking, frequency database).
+
+Run the Python harness against hardware impairment profiles:
+
+```bash
+cd tools/test_harness
+python verify_realworld.py              # all 5 profiles
+python verify_realworld.py --stress-snr # SNR sweep -10 to +30 dB
+```
+
+---
+
 ## Build from Source
 
 ```bash

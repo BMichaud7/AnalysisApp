@@ -33,8 +33,8 @@ using json = nlohmann::json;
 using namespace std::chrono;
 
 // ── JSON encoding for task request ────────────────────────────────────────────
-// The SdrResourceManager MessageCodec::decode() reads the following fields.
-// We must produce JSON that matches what decode() expects.
+// dest_ip only — controller allocates a port from its pool and returns it in
+// streams[0].udp_port of the TASK_RESPONSE.  We bind AFTER getting that port.
 
 static std::string buildTaskRequestJson(const std::string& request_id,
                                          double center_freq_hz,
@@ -42,7 +42,6 @@ static std::string buildTaskRequestJson(const std::string& request_id,
                                          double sample_rate_sps,
                                          int64_t duration_ms,
                                          const std::string& dest_ip,
-                                         int dest_port,
                                          int rank)
 {
     auto ts = duration_cast<milliseconds>(
@@ -65,10 +64,7 @@ static std::string buildTaskRequestJson(const std::string& request_id,
             {"sample_rate_sps", sample_rate_sps},
             {"rx_count",        1}
         }},
-        {"streaming", {
-            {"dest_ip",    dest_ip},
-            {"dest_ports", json::array({dest_port})}
-        }}
+        {"streaming", {{"dest_ip", dest_ip}}}
     };
     return j.dump();
 }
@@ -133,28 +129,19 @@ public:
     }
 
     void on_message(proton::delivery& d, proton::message& m) override {
+        d.accept();
         try {
             std::string body = proton::get<std::string>(m.body());
             on_response_(body);
         } catch (const std::exception& ex) {
             on_error_(std::string("on_message parse error: ") + ex.what());
         }
-        d.accept();
-        // Close connection after first response
         sender_.connection().close();
     }
 
-    void on_transport_error(proton::transport& t) override {
-        on_error_(t.error().what());
-    }
-
-    void on_connection_error(proton::connection& c) override {
-        on_error_(c.error().what());
-    }
-
-    void on_error(const proton::error_condition& e) override {
-        on_error_(e.what());
-    }
+    void on_transport_error(proton::transport& t) override { on_error_(t.error().what()); }
+    void on_connection_error(proton::connection& c) override { on_error_(c.error().what()); }
+    void on_error(const proton::error_condition& e) override { on_error_(e.what()); }
 
 private:
     BrokerCfg    cfg_;
@@ -165,9 +152,11 @@ private:
     std::function<void(const std::string&)> on_error_;
 };
 
-// ── UDP receive ───────────────────────────────────────────────────────────────
+// ── UDP helpers ───────────────────────────────────────────────────────────────
 
-static int openUdpSocket()
+// Bind to the specific port the controller allocated — called AFTER parsing
+// streams[0].udp_port from the TASK_RESPONSE, never before.
+static int openBoundUdpSocket(int port)
 {
     int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return -1;
@@ -177,22 +166,13 @@ static int openUdpSocket()
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(0);  // OS assigns port
+    addr.sin_port        = htons(static_cast<uint16_t>(port));
     addr.sin_addr.s_addr = INADDR_ANY;
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         ::close(fd);
         return -1;
     }
     return fd;
-}
-
-static int getSocketPort(int fd)
-{
-    sockaddr_in addr{};
-    socklen_t len = sizeof(addr);
-    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) == 0)
-        return ntohs(addr.sin_port);
-    return 0;
 }
 
 static std::vector<float> receiveIq(int udp_fd, int target_samples, int timeout_ms)
@@ -264,52 +244,32 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
                                          double bandwidth_hz,
                                          const std::string& request_id)
 {
-    // Open UDP socket
-    int udp_fd = openUdpSocket();
-    if (udp_fd < 0) {
-        spdlog::error("IqCollector: failed to open UDP socket: {}",
-                      strerror(errno));
-        return {};
-    }
-    int udp_port = getSocketPort(udp_fd);
-    spdlog::debug("IqCollector: UDP listening on port {}", udp_port);
-
-    double bw  = std::max(bandwidth_hz, 25000.0);
-    double sr  = col_cfg_.analysis_sample_rate_sps;
+    double bw     = std::max(bandwidth_hz, 25000.0);
+    double sr     = col_cfg_.analysis_sample_rate_sps;
     int64_t dur_ms = static_cast<int64_t>(
                          (double)col_cfg_.collect_samples / sr * 1000.0) + 500;
 
-    // Build task request JSON
+    // Step 1: submit task — no port specified, controller allocates from pool
     std::string req_json = buildTaskRequestJson(
-        request_id, center_freq_hz, bw, sr, dur_ms,
-        local_ip_, udp_port, 1);
-
-    // Send request and receive response via AMQP
-    std::mutex mu;
-    std::condition_variable cv;
-    std::string response_body;
-    std::string error_body;
-    bool done = false;
+        request_id, center_freq_hz, bw, sr, dur_ms, local_ip_, /*rank=*/1);
 
     RpcHandler::BrokerCfg bcfg{
-        amqp_cfg_.url,
-        amqp_cfg_.username,
-        amqp_cfg_.password,
-        amqp_cfg_.task_request_queue,
-        amqp_cfg_.task_response_queue
+        amqp_cfg_.url, amqp_cfg_.username, amqp_cfg_.password,
+        amqp_cfg_.task_request_queue, amqp_cfg_.task_response_queue
     };
+
+    std::mutex mu;
+    std::condition_variable cv;
+    std::string response_body, error_body;
+    bool done = false;
 
     auto on_resp = [&](const std::string& body) {
         std::lock_guard<std::mutex> lk(mu);
-        response_body = body;
-        done = true;
-        cv.notify_all();
+        response_body = body; done = true; cv.notify_all();
     };
     auto on_err = [&](const std::string& err) {
         std::lock_guard<std::mutex> lk(mu);
-        error_body = err;
-        done = true;
-        cv.notify_all();
+        error_body = err; done = true; cv.notify_all();
     };
 
     RpcHandler handler(bcfg, req_json, on_resp, on_err);
@@ -325,41 +285,50 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
 
     if (!error_body.empty()) {
         spdlog::error("IqCollector: AMQP error: {}", error_body);
-        ::close(udp_fd);
         return {};
     }
 
-    // Parse TASK_RESPONSE — decode status and extract task_id + sample_rate
+    // Step 2: parse TASK_RESPONSE, get controller-allocated UDP port
     std::string accepted_task_id;
+    int udp_port = 0;
     try {
         auto j = json::parse(response_body);
-        std::string status = j.value("status", "");
-        bool accepted = (status == "ACCEPTED");
+        bool accepted = (j.value("status", "") == "ACCEPTED");
         if (!accepted) {
             spdlog::warn("IqCollector: task rejected: {}",
                          j.value("reject_reason", "unknown"));
-            ::close(udp_fd);
             return {};
         }
-
         accepted_task_id = j.value("task_id", "");
 
-        // Extract sample rate from first stream
         if (j.contains("streams") && j["streams"].is_array() && !j["streams"].empty()) {
+            udp_port = j["streams"][0].value("udp_port", 0);
             last_sr_ = j["streams"][0].value("sample_rate_sps", sr);
         } else {
             last_sr_ = sr;
         }
 
-        spdlog::debug("IqCollector: task accepted id='{}' sr={} Hz",
-                      accepted_task_id, last_sr_);
+        if (udp_port == 0) {
+            spdlog::error("IqCollector: ACCEPTED response missing streams[0].udp_port");
+            return {};
+        }
+        spdlog::debug("IqCollector: task accepted id='{}' udp_port={} sr={:.0f} Hz",
+                      accepted_task_id, udp_port, last_sr_);
     } catch (const std::exception& ex) {
         spdlog::error("IqCollector: failed to parse TASK_RESPONSE: {}", ex.what());
-        ::close(udp_fd);
         return {};
     }
 
-    // Receive IQ data
+    // Step 3: bind to the controller-allocated port
+    int udp_fd = openBoundUdpSocket(udp_port);
+    if (udp_fd < 0) {
+        spdlog::error("IqCollector: failed to bind UDP socket on port {}: {}",
+                      udp_port, strerror(errno));
+        return {};
+    }
+    spdlog::info("IqCollector: UDP bound on port {}", udp_port);
+
+    // Step 4: receive IQ
     auto iq = receiveIq(udp_fd, col_cfg_.collect_samples,
                          col_cfg_.analysis_timeout_ms);
     ::close(udp_fd);
@@ -367,7 +336,7 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
     spdlog::info("IqCollector: collected {} samples (sr={:.0f} Hz)",
                  static_cast<int>(iq.size()) / 2, last_sr_);
 
-    // Send TASK_STOP
+    // Step 5: send TASK_STOP
     if (!accepted_task_id.empty()) {
         std::string stop_json = buildTaskStopJson(request_id + "_stop",
                                                    accepted_task_id);
