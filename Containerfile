@@ -65,7 +65,13 @@ RUN cmake -B build \
     && cmake --install build
 
 
-# ── Stage 2: Runtime image ────────────────────────────────────────────────
+# ── Stage 2: Test runner ──────────────────────────────────────────────────
+# podman build --target test .
+FROM builder AS test
+RUN ctest --test-dir build --output-on-failure -V
+
+
+# ── Stage 3: Runtime image ────────────────────────────────────────────────
 FROM quay.io/centos/centos:stream10 AS runtime
 
 ENV LANG=C.UTF-8

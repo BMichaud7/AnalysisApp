@@ -88,14 +88,14 @@ std::string ModulationClassifier::classifyConstantEnvelope(const SignalFeatures&
         return "FSK";
     }
 
-    // BPSK: c40 ≈ -2
-    if (std::abs(f.c40_real - (-2.0)) < 0.3) {
+    // BPSK: c40 ≈ -2, c42 ≈ -2  (real signal s=±1; both cumulants equal -2)
+    if (std::abs(f.c40_real - (-2.0)) < 0.4 && f.c42 < -1.5) {
         m_ary_out = 2;
         return "BPSK";
     }
 
-    // QPSK: c40 ≈ -2, c42 ≈ 0
-    if (std::abs(f.c40_real - (-2.0)) < 0.5 && std::abs(f.c42) < 0.3) {
+    // QPSK: c40 ≈ -2, c42 ≈ -1  (complex signal; E[s²]=0 → C42=E[|s|⁴]-2=-1)
+    if (std::abs(f.c40_real - (-2.0)) < 0.5 && std::abs(f.c42 + 1.0) < 0.6) {
         m_ary_out = 4;
         return "QPSK";
     }

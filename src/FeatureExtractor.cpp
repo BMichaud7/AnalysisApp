@@ -277,30 +277,29 @@ bool FeatureExtractor::detectOfdm(const std::vector<cf32>& x,
             int sym_len = nfft + ncp;
             if (sym_len * 4 > total) continue;  // need several symbols
 
-            // Compute cyclic-prefix correlator:
-            // R = sum_k |x[n+k] * conj(x[n+k+Nfft])| for k=0..Ncp-1
-            // Averaged over several symbol positions.
-            double sum_corr  = 0.0;
-            double sum_power = 0.0;
+            // Cyclic-prefix correlator (Schmidl-Cox style):
+            // Uses complex correlation so random signal phases cancel;
+            // score = |sum x[n+k]*conj(x[n+k+Nfft])| / sqrt(Pa * Pb).
+            // Perfect CP → 1.0.  Random → ~0 (phases cancel).
+            std::complex<double> sum_corr{0, 0};
+            double sum_pa    = 0.0;
+            double sum_pb    = 0.0;
             int    n_syms    = 0;
 
             for (int n = 0; n + sym_len <= total; n += sym_len) {
-                double corr = 0.0;
-                double pwr  = 0.0;
                 for (int k = 0; k < ncp; ++k) {
-                    cf32 a = x[n + k];
-                    cf32 b = x[n + k + nfft];
-                    corr += std::abs(a * std::conj(b));
-                    pwr  += (std::norm(a) + std::norm(b)) * 0.5f;
+                    std::complex<double> a(x[n + k].real(),        x[n + k].imag());
+                    std::complex<double> b(x[n + k + nfft].real(), x[n + k + nfft].imag());
+                    sum_corr += a * std::conj(b);
+                    sum_pa   += std::norm(a);
+                    sum_pb   += std::norm(b);
                 }
-                sum_corr  += corr;
-                sum_power += pwr;
                 ++n_syms;
             }
 
-            if (n_syms == 0 || sum_power < 1e-12) continue;
+            if (n_syms == 0 || sum_pa < 1e-12 || sum_pb < 1e-12) continue;
 
-            double score = sum_corr / sum_power / ncp;
+            double score = std::abs(sum_corr) / std::sqrt(sum_pa * sum_pb);
 
             if (score > best_score) {
                 best_score   = score;

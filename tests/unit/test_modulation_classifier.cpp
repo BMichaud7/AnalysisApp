@@ -45,11 +45,13 @@ TEST_F(ModulationClassifierTest, LowSnrUnclassified)
 TEST_F(ModulationClassifierTest, BpskClassification)
 {
     auto f = makeFeatures();
-    // BPSK: constant envelope, c40 ≈ -2
+    // BPSK: constant envelope, real signal (s=±1)
+    // Theoretical: c40=-2, c42=-2 (both real-signal cumulants equal -2)
     f.envelope_variance_norm = 0.02;
+    f.spectral_flatness      = 0.55;     // wideband — rules out GMSK (< 0.2)
     f.c40_real               = -2.0;
     f.c40_imag               = 0.0;
-    f.c42                    = 0.05;
+    f.c42                    = -2.0;     // real signal: c42 = E[|s|⁴]-|E[s²]|²-2E[|s|²]² = -2
     f.symbol_rate_sps        = 50000.0;
     f.fm_deviation_hz        = 1000.0;   // low
 
@@ -66,10 +68,13 @@ TEST_F(ModulationClassifierTest, BpskClassification)
 TEST_F(ModulationClassifierTest, QpskClassification)
 {
     auto f = makeFeatures();
+    // QPSK: constant envelope, complex signal
+    // Theoretical: c40=-2, c42=-1 (|s|=1, E[s²]=0, so C42=1-0-2=-1)
     f.envelope_variance_norm = 0.03;
+    f.spectral_flatness      = 0.55;     // wideband — rules out GMSK (< 0.2)
     f.c40_real               = -2.0;
     f.c40_imag               = 0.0;
-    f.c42                    = 0.0;
+    f.c42                    = -1.0;     // complex signal: c42 ≈ -1
     f.symbol_rate_sps        = 100000.0;
     f.fm_deviation_hz        = 1000.0;
 
@@ -192,8 +197,9 @@ TEST_F(ModulationClassifierTest, BitRateFromSymbolRate)
 {
     auto f = makeFeatures();
     f.envelope_variance_norm = 0.03;
+    f.spectral_flatness      = 0.55;     // wideband — rules out GMSK (< 0.2)
     f.c40_real               = -2.0;
-    f.c42                    = 0.0;
+    f.c42                    = -1.0;     // QPSK: c42 ≈ -1
     f.symbol_rate_sps        = 9600.0;
     f.fm_deviation_hz        = 100.0;
 

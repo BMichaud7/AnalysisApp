@@ -185,12 +185,13 @@ TEST_F(FeatureExtractorTest, BpskCumulants)
 
     auto f = extractor_.extract(iq, SR, 0.0);
 
-    // BPSK theoretical: c40 = -2, c42 = 0
-    // Allow generous tolerance for finite-sample estimation
+    // BPSK theoretical (real signal s=±1):
+    //   c40 = E[s⁴] - 3(E[s²])² = 1 - 3 = -2
+    //   c42 = E[|s|⁴] - |E[s²]|² - 2(E[|s|²])² = 1 - 1 - 2 = -2
     EXPECT_NEAR(f.c40_real, -2.0, 0.6)
         << "c40_real for BPSK should be near -2";
-    EXPECT_NEAR(f.c42, 0.0, 0.8)
-        << "c42 for BPSK should be near 0";
+    EXPECT_NEAR(f.c42, -2.0, 0.8)
+        << "c42 for BPSK should be near -2 (real signal)";
 
     // Symbol rate detection
     if (f.symbol_rate_sps > 0) {
