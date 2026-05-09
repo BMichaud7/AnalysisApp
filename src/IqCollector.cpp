@@ -94,10 +94,12 @@ public:
     };
 
     RpcHandler(BrokerCfg cfg, std::string request_body,
+               std::string request_id,
                std::function<void(const std::string&)> on_response,
                std::function<void(const std::string&)> on_error)
         : cfg_(std::move(cfg))
         , request_body_(std::move(request_body))
+        , request_id_(std::move(request_id))
         , on_response_(std::move(on_response))
         , on_error_(std::move(on_error))
     {}
@@ -132,6 +134,15 @@ public:
         d.accept();
         try {
             std::string body = proton::get<std::string>(m.body());
+            // Match by request_id — discard stale responses from other apps
+            // that share the same sdr.task.response queue (e.g. AcquisitionApp)
+            auto j = json::parse(body);
+            if (!request_id_.empty() &&
+                j.value("request_id", "") != request_id_) {
+                spdlog::debug("IqCollector: discarding stale response for req={}",
+                              j.value("request_id", "?"));
+                return;  // stay connected, wait for our response
+            }
             on_response_(body);
         } catch (const std::exception& ex) {
             on_error_(std::string("on_message parse error: ") + ex.what());
@@ -146,6 +157,7 @@ public:
 private:
     BrokerCfg    cfg_;
     std::string  request_body_;
+    std::string  request_id_;
     proton::sender   sender_;
     proton::receiver receiver_;
     std::function<void(const std::string&)> on_response_;
@@ -272,7 +284,7 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
         error_body = err; done = true; cv.notify_all();
     };
 
-    RpcHandler handler(bcfg, req_json, on_resp, on_err);
+    RpcHandler handler(bcfg, req_json, request_id, on_resp, on_err);
     proton::container container(handler);
     std::thread amqp_thread([&]{ container.run(); });
 
@@ -341,7 +353,7 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
         std::string stop_json = buildTaskStopJson(request_id + "_stop",
                                                    accepted_task_id);
         auto noop = [](const std::string&){};
-        RpcHandler stop_handler(bcfg, stop_json, noop, noop);
+        RpcHandler stop_handler(bcfg, stop_json, "", noop, noop);
         proton::container stop_c(stop_handler);
         std::thread stop_th([&]{ stop_c.run(); });
         if (stop_th.joinable()) stop_th.join();
