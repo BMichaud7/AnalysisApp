@@ -7,7 +7,11 @@
 #include <proton/connection.hpp>
 #include <proton/connection_options.hpp>
 #include <proton/sender.hpp>
+#include <proton/sender_options.hpp>
 #include <proton/receiver.hpp>
+#include <proton/receiver_options.hpp>
+#include <proton/source_options.hpp>
+#include <proton/target_options.hpp>
 #include <proton/delivery.hpp>
 #include <proton/work_queue.hpp>
 #include <proton/transport.hpp>
@@ -117,10 +121,18 @@ public:
     }
 
     void on_connection_open(proton::connection& c) override {
-        sender_ = c.open_sender(cfg_.request_queue);
-        // Only open a receiver when we expect a response
-        if (!cfg_.response_queue.empty())
-            receiver_ = c.open_receiver(cfg_.response_queue);
+        // Use ANYCAST capabilities so Artemis creates proper queue addresses
+        // (MULTICAST default stalls credit propagation by ~15s per connection).
+        proton::sender_options sopts;
+        sopts.target(proton::target_options().capabilities(
+            {proton::symbol("queue")}));
+        sender_ = c.open_sender(cfg_.request_queue, sopts);
+        if (!cfg_.response_queue.empty()) {
+            proton::receiver_options ropts;
+            ropts.source(proton::source_options().capabilities(
+                {proton::symbol("queue")}));
+            receiver_ = c.open_receiver(cfg_.response_queue, ropts);
+        }
     }
 
     void on_sender_open(proton::sender& s) override {

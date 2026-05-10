@@ -111,4 +111,4 @@ ENV SDR_LOG_LEVEL=info
 EXPOSE 20000-20099/udp
 
 ENTRYPOINT ["/usr/local/bin/tini", "--"]
-CMD ["/usr/local/bin/sdr_analysis", "--config", "/etc/sdr-analysis/analysis.xml"]
+CMD ["/usr/local/bin/sdr_analysis", "/etc/sdr-analysis/analysis.xml"]
