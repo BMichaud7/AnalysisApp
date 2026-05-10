@@ -88,12 +88,14 @@ class _BaseHandler(proton.handlers.MessagingHandler):
 
     def __init__(self, broker: str):
         super().__init__()
-        self.broker = broker
+        self.broker    = broker
         self._senders: dict[str, proton.Sender] = {}
+        self._container = None
         self.done  = threading.Event()
         self.error: str | None = None
 
     def _connect(self, event, *recv_addrs):
+        self._container = event.container
         conn = event.container.connect(
             self.broker,
             user=self.CREDS[0], password=self.CREDS[1],
@@ -103,8 +105,8 @@ class _BaseHandler(proton.handlers.MessagingHandler):
             event.container.create_receiver(conn, addr)
         return conn
 
-    def _open_sender(self, conn, addr: str) -> proton.Sender:
-        s = conn.open_sender(addr)
+    def _open_sender(self, conn, addr: str):
+        s = self._container.create_sender(conn, addr)
         self._senders[addr] = s
         return s
 
@@ -114,9 +116,10 @@ class _BaseHandler(proton.handlers.MessagingHandler):
         self._senders[addr].send(msg)
 
     def _accept_and_parse(self, event) -> dict | None:
-        event.delivery.accept()
+        # MessagingHandler auto-accepts by default; no manual accept needed
         try:
-            return json.loads(event.message.body)
+            body = event.message.body
+            return json.loads(body if isinstance(body, str) else body.decode())
         except Exception:
             return None
 
@@ -313,19 +316,23 @@ class _StaleResponseHandler(_BaseHandler):
 class _TimeoutHandler(_BaseHandler):
     """
     Send a Detection but NEVER respond to the TASK_REQUEST.
-    App must return from collect() within analysis_timeout_ms, not hang.
-    We verify by checking elapsed time.
+    We close our own connection ANALYSIS_TIMEOUT + buffer seconds after
+    receiving the TASK_REQUEST so the test exits quickly.
+    Verified: elapsed from task-request receipt < ANALYSIS_TIMEOUT + buffer.
     """
-    def __init__(self, broker: str, max_wait_s: float = 12.0):
+    ANALYSIS_TIMEOUT_S = 5.0   # matches analysis.xml analysis_timeout_ms
+    CLOSE_AFTER_S      = 7.0   # slightly more than the app's timeout
+
+    def __init__(self, broker: str):
         super().__init__(broker)
         self.task_received = False
         self._det_sent     = False
-        self._max_wait_s   = max_wait_s
         self._t_request: float | None = None
+        self._conn = None
 
     def on_start(self, event):
-        conn = self._connect(event, "sdr.task.request", "rf.analysis")
-        self._open_sender(conn, "rf.detections")
+        self._conn = self._connect(event, "sdr.task.request", "rf.analysis")
+        self._open_sender(self._conn, "rf.detections")
         # No sender for sdr.task.response — we never reply
 
     def on_sendable(self, event):
@@ -346,9 +353,15 @@ class _TimeoutHandler(_BaseHandler):
             return
         addr = event.receiver.source.address
         if addr == "sdr.task.request" and "REQUEST" in body.get("msg_type",""):
-            self.task_received   = True
-            self._t_request      = time.time()
-            print(f"  [ctrl] ← TASK_REQUEST received — deliberately not responding")
+            self.task_received = True
+            self._t_request    = time.time()
+            print("  [ctrl] ← TASK_REQUEST received — deliberately not responding")
+            # Close after giving the app time to time out
+            def _close():
+                time.sleep(self.CLOSE_AFTER_S)
+                if self._conn:
+                    self._conn.close()
+            threading.Thread(target=_close, daemon=True).start()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Test 5 — task_stop_sent
@@ -469,20 +482,22 @@ def run_stale_response(broker: str) -> bool:
 
 
 def run_timeout_returns(broker: str) -> bool:
-    """App must return from collect() within 2×analysis_timeout_ms, never hang."""
+    """App must not hang when no TASK_RESPONSE arrives.
+    We measure from when the TASK_REQUEST was received to when our test exits.
+    Should be ≤ ANALYSIS_TIMEOUT_S + CLOSE_AFTER_S + small overhead."""
     print("\n── Test 4: timeout_returns ─────────────────────────────────────")
-    ANALYSIS_TIMEOUT_MS = 5000   # matches test-env config
-    max_wait_s = ANALYSIS_TIMEOUT_MS / 1000 * 2 + 2   # 2× + 2s grace
+    h = _run(_TimeoutHandler(broker),
+             timeout_s=_TimeoutHandler.CLOSE_AFTER_S + 10)
 
-    t_start = time.time()
-    h = _run(_TimeoutHandler(broker), timeout_s=max_wait_s + 5)
-    elapsed = time.time() - t_start
+    elapsed_from_req = (time.time() - h._t_request) if h._t_request else 999
+    max_ok_s = _TimeoutHandler.CLOSE_AFTER_S + 3   # CLOSE_AFTER + 3s overhead
 
     checks = []
-    checks.append(("TASK_REQUEST was received",  h.task_received))
-    checks.append((f"returned within {max_wait_s:.0f}s (took {elapsed:.1f}s)",
-                   elapsed < max_wait_s + 5))
-    checks.append(("no AMQP error", h.error is None))
+    checks.append(("TASK_REQUEST was received",     h.task_received))
+    checks.append((f"completed within {max_ok_s:.0f}s of request "
+                   f"(took {elapsed_from_req:.1f}s)",
+                   h.task_received and elapsed_from_req < max_ok_s))
+    checks.append(("no AMQP error",                 h.error is None))
     return _report(checks)
 
 

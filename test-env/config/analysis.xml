@@ -5,7 +5,7 @@
   <streaming_ip>127.0.0.1</streaming_ip>
 
   <amqp>
-    <url>amqp://localhost:5672</url>
+    <url>amqp://localhost:5674</url>
     <username>sdr_ctrl</username>
     <password>test_password</password>
     <detections_topic>rf.detections</detections_topic>

@@ -117,8 +117,10 @@ public:
     }
 
     void on_connection_open(proton::connection& c) override {
-        sender_   = c.open_sender(cfg_.request_queue);
-        receiver_ = c.open_receiver(cfg_.response_queue);
+        sender_ = c.open_sender(cfg_.request_queue);
+        // Only open a receiver when we expect a response
+        if (!cfg_.response_queue.empty())
+            receiver_ = c.open_receiver(cfg_.response_queue);
     }
 
     void on_sender_open(proton::sender& s) override {
@@ -128,6 +130,9 @@ public:
         msg.durable(false);
         s.send(msg);
         spdlog::debug("IqCollector: sent request ({} bytes)", request_body_.size());
+        // Fire-and-forget (e.g. TASK_STOP): close after sending, no reply needed
+        if (cfg_.response_queue.empty())
+            s.connection().close();
     }
 
     void on_message(proton::delivery& d, proton::message& m) override {
@@ -290,12 +295,17 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
     proton::container container(handler);
     std::thread amqp_thread([&]{ container.run(); });
 
+    bool timed_out = false;
     {
         std::unique_lock<std::mutex> lk(mu);
         cv.wait_for(lk, milliseconds(col_cfg_.analysis_timeout_ms),
                     [&]{ return done; });
+        timed_out = !done;
     }
-    container.stop();  // unblock the thread if response never arrived
+    // Only stop the container on timeout — on success the connection closes
+    // itself gracefully in on_message(); an unconditional stop() races with
+    // that close and triggers a spurious connection-aborted error.
+    if (timed_out) container.stop();
     if (amqp_thread.joinable()) amqp_thread.join();
 
     if (!error_body.empty()) {
@@ -351,12 +361,17 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
     spdlog::info("IqCollector: collected {} samples (sr={:.0f} Hz)",
                  static_cast<int>(iq.size()) / 2, last_sr_);
 
-    // Step 5: send TASK_STOP
+    // Step 5: fire-and-forget TASK_STOP (no response expected)
     if (!accepted_task_id.empty()) {
         std::string stop_json = buildTaskStopJson(request_id + "_stop",
                                                    accepted_task_id);
         auto noop = [](const std::string&){};
-        RpcHandler stop_handler(bcfg, stop_json, "", noop, noop);
+        // Empty response_queue → fire-and-forget; on_sender_open closes immediately
+        RpcHandler::BrokerCfg stop_bcfg{
+            amqp_cfg_.url, amqp_cfg_.username, amqp_cfg_.password,
+            amqp_cfg_.task_request_queue, ""
+        };
+        RpcHandler stop_handler(stop_bcfg, stop_json, "", noop, noop);
         proton::container stop_c(stop_handler);
         std::thread stop_th([&]{ stop_c.run(); });
         if (stop_th.joinable()) stop_th.join();
