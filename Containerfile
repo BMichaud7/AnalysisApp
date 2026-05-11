@@ -43,8 +43,9 @@ RUN dnf install -y \
         fmt-devel \
     && dnf clean all
 
-# Clone SdrTaskApi (shared types/codec — sibling dependency)
-RUN git clone --depth 1 https://github.com/BMichaud7/SdrTaskApi.git /workspace/SdrTaskApi
+# Clone SdrSdk and SdrTaskApi (sibling dependencies)
+RUN git clone --depth 1 --branch "main/1.0" https://github.com/BMichaud7/SdrSdk.git /workspace/SdrSdk && \
+    git clone --depth 1 --branch "main/1.0" https://github.com/BMichaud7/SdrTaskApi.git /workspace/SdrTaskApi
 
 # Copy AnalysisApp source
 WORKDIR /workspace/AnalysisApp

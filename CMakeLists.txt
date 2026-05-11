@@ -9,17 +9,24 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 
-# ── SdrTaskApi sibling ────────────────────────────────────────────────────────
+# ── SdrSdk (provides sdr_task_api types via its subdirectory) ─────────────────
+# Expected as a sibling directory: ../SdrSdk  (same parent as this repo).
+# SdrSdk itself expects ../SdrTaskApi as its own sibling.
 get_filename_component(PARENT "${CMAKE_SOURCE_DIR}" DIRECTORY)
-if(EXISTS "${PARENT}/SdrTaskApi/CMakeLists.txt")
-    message(STATUS "[AnalysisApp] SdrTaskApi: using sibling source at ${PARENT}/SdrTaskApi")
+if(EXISTS "${PARENT}/SdrSdk/CMakeLists.txt")
+    message(STATUS "[AnalysisApp] using sibling SdrSdk at ${PARENT}/SdrSdk")
+    set(SDRSDK_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SDRSDK_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${PARENT}/SdrSdk" "${CMAKE_BINARY_DIR}/SdrSdk")
+elseif(EXISTS "${PARENT}/SdrTaskApi/CMakeLists.txt")
+    message(STATUS "[AnalysisApp] using sibling SdrTaskApi at ${PARENT}/SdrTaskApi")
     add_subdirectory("${PARENT}/SdrTaskApi" "${CMAKE_BINARY_DIR}/SdrTaskApi")
 else()
     find_package(sdr_task_api QUIET)
     if(NOT sdr_task_api_FOUND)
-        message(FATAL_ERROR "[AnalysisApp] SdrTaskApi not found.\n  Clone as sibling:\n    git clone https://github.com/BMichaud7/SdrTaskApi.git ../SdrTaskApi")
+        message(FATAL_ERROR "[AnalysisApp] SdrSdk not found.\n  Clone as sibling directories:\n    git clone https://github.com/BMichaud7/SdrSdk.git ../SdrSdk\n    git clone https://github.com/BMichaud7/SdrTaskApi.git ../SdrTaskApi")
     endif()
-    message(STATUS "[AnalysisApp] SdrTaskApi: using installed package ${sdr_task_api_VERSION}")
+    message(STATUS "[AnalysisApp] using installed sdr_task_api ${sdr_task_api_VERSION}")
 endif()
 
 # ── FFTW3 (single precision) ──────────────────────────────────────────────────
