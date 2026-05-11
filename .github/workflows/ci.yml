@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["main/1.0"]
+  pull_request:
+    branches: ["main/1.0"]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            cmake ninja-build pkg-config git \
+            libqpid-proton-cpp12-dev \
+            libtinyxml2-dev \
+            libfmt-dev \
+            libfftw3-dev \
+            uuid-dev
+
+      - name: Clone SdrTaskApi (sibling dependency)
+        run: |
+          git clone --depth 1 \
+            https://github.com/BMichaud7/SdrTaskApi.git \
+            ../SdrTaskApi
+
+      - name: Configure
+        run: |
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DFETCHCONTENT_QUIET=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run unit tests
+        run: ctest --test-dir build --output-on-failure -V --timeout 60
