@@ -1,0 +1,5 @@
+# Generated training data and model artifacts — not tracked in source
+data/
+models/
+__pycache__/
+*.pyc

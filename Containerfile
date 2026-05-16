@@ -47,6 +47,12 @@ RUN dnf install -y \
 RUN git clone --depth 1 --branch "main/1.0" https://github.com/BMichaud7/SdrSdk.git /workspace/SdrSdk && \
     git clone --depth 1 --branch "main/1.0" https://github.com/BMichaud7/SdrTaskApi.git /workspace/SdrTaskApi
 
+# ONNX Runtime — CPU-only build (enables ML-based AMR via OnnxClassifier)
+RUN curl -fsSL \
+    https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-linux-x64-1.17.3.tgz \
+    | tar xz -C /opt && \
+    ln -s /opt/onnxruntime-linux-x64-1.17.3 /opt/onnxruntime
+
 # Copy AnalysisApp source
 WORKDIR /workspace/AnalysisApp
 COPY CMakeLists.txt     .
@@ -56,12 +62,14 @@ COPY tests/             tests/
 COPY config/            config/
 COPY build.sh           .
 
-# Build release — nlohmann/json and spdlog fetched by FetchContent if absent
+# Build release with ONNX Runtime for ML-based classification
 RUN cmake -B build \
         -S . \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/install \
         -DFETCHCONTENT_QUIET=OFF \
+        -DWITH_ONNX=ON \
+        -DONNXRUNTIME_ROOT=/opt/onnxruntime \
     && cmake --build build --parallel "$(nproc)" \
     && cmake --install build
 
@@ -99,8 +107,10 @@ RUN groupadd -r sdranalysis && \
 # Config volume mount point (ConfigMap mounts here in Kubernetes)
 RUN mkdir -p /etc/sdr-analysis && chown sdranalysis:sdranalysis /etc/sdr-analysis
 
-# Copy built binary and default config
-COPY --from=builder /install/bin/sdr_analysis /usr/local/bin/sdr_analysis
+# Copy built binary, ONNX Runtime lib, and default config
+COPY --from=builder /install/bin/sdr_analysis         /usr/local/bin/sdr_analysis
+COPY --from=builder /opt/onnxruntime/lib/libonnxruntime.so* /usr/local/lib/
+RUN echo /usr/local/lib > /etc/ld.so.conf.d/local.conf && ldconfig
 COPY --from=builder /workspace/AnalysisApp/config/analysis.xml /etc/sdr-analysis/analysis.xml
 
 USER sdranalysis

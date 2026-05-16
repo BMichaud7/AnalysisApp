@@ -282,7 +282,11 @@ def main() -> None:
         dataset, [n_train, n_val, n_test],
         generator=torch.Generator().manual_seed(42),
     )
-    kw = dict(batch_size=args.batch, num_workers=4, pin_memory=True)
+    import torch as _torch
+    _use_gpu = args.cuda and _torch.cuda.is_available()
+    kw = dict(batch_size=args.batch,
+              num_workers=4 if _use_gpu else 0,
+              pin_memory=_use_gpu)
     train_loader = DataLoader(train_ds, shuffle=True,  **kw)
     val_loader   = DataLoader(val_ds,   shuffle=False, **kw)
     test_loader  = DataLoader(test_ds,  shuffle=False, **kw)

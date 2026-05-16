@@ -1,7 +1,8 @@
 torch>=2.1
 torchvision>=0.16
+torchaudio>=2.1
 onnx>=1.15
-onnxruntime-gpu>=1.17   # CPU fallback: onnxruntime
+onnxruntime>=1.17          # GPU variant: onnxruntime-gpu
 numpy>=1.24
 scipy>=1.11
 h5py>=3.9
@@ -9,7 +10,10 @@ tqdm>=4.66
 matplotlib>=3.7
 pandas>=2.0
 scikit-learn>=1.3
-# Optional: Kaggle dataset downloads
+opencv-python-headless>=4.8
+# TorchSig — 57-class RF signal generator & augmentation library
+torchsig>=2.1
+# Optional: Kaggle dataset downloads (RadioML 2016/2018)
 kaggle>=1.6
 # Optional: HuggingFace dataset integration
 datasets>=2.18
