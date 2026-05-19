@@ -93,10 +93,14 @@ AppConfig parseConfig(const std::string& xml_path)
         // <engine><onnx> — optional ML fallback
         const auto* onnx_el = eng_el->FirstChildElement("onnx");
         if (onnx_el) {
-            cfg.engine.onnx.model_path   = xmlText  (onnx_el, "model_path",  "");
-            cfg.engine.onnx.classes_path = xmlText  (onnx_el, "classes_path","");
-            cfg.engine.onnx.use_gpu      = xmlText  (onnx_el, "use_gpu",     "true") != "false";
-            cfg.engine.onnx.input_len    = xmlInt   (onnx_el, "input_len",   1024);
+            cfg.engine.onnx.model_path         = xmlText  (onnx_el, "model_path",  "");
+            cfg.engine.onnx.classes_path       = xmlText  (onnx_el, "classes_path","");
+            cfg.engine.onnx.use_gpu            = xmlText  (onnx_el, "use_gpu",     "true") != "false";
+            cfg.engine.onnx.use_tensorrt       = xmlText  (onnx_el, "use_tensorrt","true") != "false";
+            cfg.engine.onnx.tensorrt_fp16      = xmlText  (onnx_el, "tensorrt_fp16","true") != "false";
+            cfg.engine.onnx.tensorrt_cache_mb  = xmlInt   (onnx_el, "tensorrt_cache_mb", 128);
+            cfg.engine.onnx.input_len          = xmlInt   (onnx_el, "input_len",   1024);
+            cfg.engine.onnx.max_batch          = xmlInt   (onnx_el, "max_batch",   8);
             cfg.engine.onnx.fallback_confidence =
                 xmlDouble(onnx_el, "fallback_confidence_threshold", 0.60);
             cfg.engine.onnx.fallback_on_unknown =
@@ -105,8 +109,20 @@ AppConfig parseConfig(const std::string& xml_path)
         }
     }
 
-    spdlog::info("Config loaded from '{}': scanner={} amqp={}",
-                 xml_path, cfg.scanner_id, cfg.amqp.url);
+    // <database> — optional PostgreSQL result persistence
+    const auto* db_el = root->FirstChildElement("database");
+    if (db_el) {
+        cfg.db.host     = xmlText(db_el, "host",     cfg.db.host);
+        cfg.db.port     = xmlInt (db_el, "port",     cfg.db.port);
+        cfg.db.dbname   = xmlText(db_el, "name",     cfg.db.dbname);
+        cfg.db.user     = xmlText(db_el, "user",     cfg.db.user);
+        cfg.db.password = xmlText(db_el, "password", cfg.db.password);
+        cfg.db.enabled  = true;
+    }
+
+    spdlog::info("Config loaded from '{}': scanner={} amqp={} db={}",
+                 xml_path, cfg.scanner_id, cfg.amqp.url,
+                 cfg.db.enabled ? cfg.db.host + "/" + cfg.db.dbname : "disabled");
 
     return cfg;
 }

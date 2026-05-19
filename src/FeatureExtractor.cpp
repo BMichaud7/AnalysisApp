@@ -100,6 +100,12 @@ void FeatureExtractor::computePsd(const std::vector<cf32>& x,
 
     psd_out.assign(N, 0.0f);
 
+    // Remove DC offset (LO leakage) over the full block before framing.
+    cf32 block_mean{0.f, 0.f};
+    int  block_len = std::min(static_cast<int>(x.size()), frames * hop + N);
+    for (int i = 0; i < block_len; ++i) block_mean += x[i];
+    block_mean /= static_cast<float>(block_len);
+
     int frame_count = 0;
     for (int f = 0; f < frames; ++f) {
         int offset = f * hop;
@@ -107,7 +113,7 @@ void FeatureExtractor::computePsd(const std::vector<cf32>& x,
 
         std::vector<cf32> windowed(N);
         for (int i = 0; i < N; ++i)
-            windowed[i] = x[offset + i] * hann[i];
+            windowed[i] = (x[offset + i] - block_mean) * hann[i];
 
         std::vector<cf32> spec;
         runFftPlan(reinterpret_cast<fftwf_plan>(fft_plan_),

@@ -80,7 +80,20 @@ AnalysisResult AnalysisEngine::analyze(const std::vector<float>& iq_cf32,
         return result;
     }
 
-    // ── Layer 0: Feature extraction ───────────────────────────────────────
+    // ── ONNX inference — launched eagerly before feature extraction ───────
+    // ONNX operates on raw IQ only (no features needed) and completes in
+    // <1 ms (TRT) or ~8 ms (CPU), while feature extraction takes 20–50 ms.
+    // Launching both concurrently means total time ≈ feature_time alone.
+    // iq_cf32 is const and read-only; OnnxClassifier::classify is thread-safe.
+    std::future<OnnxResult> onnx_future;
+    if (onnx_.loaded()) {
+        onnx_future = std::async(std::launch::async,
+            [this, &iq_cf32, sample_rate_sps]() {
+                return onnx_.classify(iq_cf32, sample_rate_sps);
+            });
+    }
+
+    // ── Layer 0: Feature extraction (runs while ONNX inference is in flight)
     SignalFeatures features = extractor_.extract(iq_cf32, sample_rate_sps,
                                                   center_freq_hz);
     result.snr_db       = features.snr_db;
@@ -90,24 +103,23 @@ AnalysisResult AnalysisEngine::analyze(const std::vector<float>& iq_cf32,
     classifier_.classify(features, result);
     result.rule_confidence = ruleConfidence(result, features);
 
-    // ── ONNX fallback (if configured and warranted) ───────────────────────
+    // ── ONNX result merge ─────────────────────────────────────────────────
+    // Collect the already-finished inference result (get() is instant because
+    // ONNX always completes before feature extraction does).
     const auto& ocfg = cfg_.onnx;
-    bool run_onnx = onnx_.loaded() && (
-        (ocfg.fallback_on_unknown  && result.rule_confidence == 0.f) ||
-        (result.rule_confidence    <  static_cast<float>(ocfg.fallback_confidence))
-    );
-
-    if (run_onnx) {
-        auto onnx_res = onnx_.classify(iq_cf32, sample_rate_sps);
-        if (onnx_res.valid) {
+    if (onnx_future.valid()) {
+        auto onnx_res = onnx_future.get();
+        bool use_onnx = onnx_res.valid && (
+            (ocfg.fallback_on_unknown && result.rule_confidence == 0.f) ||
+            (result.rule_confidence   <  static_cast<float>(ocfg.fallback_confidence))
+        );
+        if (use_onnx) {
             spdlog::debug("AnalysisEngine: ONNX override rule={} ({:.0f}%) → {} ({:.0f}%)",
                           result.digital_modulation.empty()
                               ? result.analog_modulation : result.digital_modulation,
                           result.rule_confidence * 100.f,
                           onnx_res.modulation,
                           onnx_res.confidence * 100.f);
-
-            // Replace modulation with ONNX result
             result.digital_modulation = onnx_res.modulation;
             result.analog_modulation  = "";
             result.classified         = true;
@@ -137,6 +149,54 @@ AnalysisResult AnalysisEngine::analyze(const std::vector<float>& iq_cf32,
                  result.onnx_used ? " +ONNX" : "",
                  result.hypotheses.empty() ? "none" : result.hypotheses[0].system,
                  elapsed_ms);
+
+    return result;
+}
+
+// ── Fast-path: ONNX on the embedded snapshot ──────────────────────────────────
+// No feature extraction, no SDR, no task — just classify the 1 024 IQ samples
+// that arrived inside the RF_DETECTION AMQP message.
+AnalysisResult AnalysisEngine::analyzeSnapshot(
+    const std::vector<float>& iq_snapshot,
+    double sample_rate_sps,
+    double center_freq_hz,
+    const std::string& detection_id,
+    const std::string& scanner_id) const
+{
+    AnalysisResult result{};
+    result.detection_id   = detection_id;
+    result.scanner_id     = scanner_id;
+    result.center_freq_hz = center_freq_hz;
+    result.timestamp_ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+
+    if (iq_snapshot.empty() || !onnx_.loaded()) {
+        result.classified    = false;
+        result.reject_reason = "no snapshot or ONNX not loaded";
+        return result;
+    }
+
+    auto onnx_res = onnx_.classify(iq_snapshot, sample_rate_sps);
+    if (onnx_res.valid) {
+        result.digital_modulation = onnx_res.modulation;
+        result.classified         = true;
+        result.onnx_used          = true;
+        result.onnx_confidence    = onnx_res.confidence;
+
+        // Run protocol mapping so hypotheses are populated even on the fast path.
+        SignalFeatures minimal{};
+        minimal.center_freq_hz  = center_freq_hz;
+        minimal.sample_rate_sps = sample_rate_sps;
+        mapper_.map(minimal, result);
+
+        spdlog::debug("AnalysisEngine::analyzeSnapshot: {:.3f} MHz → {} ({:.0f}%)",
+                      center_freq_hz / 1e6,
+                      onnx_res.modulation, onnx_res.confidence * 100.f);
+    } else {
+        result.classified    = false;
+        result.reject_reason = "ONNX inference failed";
+    }
 
     return result;
 }

@@ -109,6 +109,13 @@ public:
             det.power_db       = j.value("power_db",       0.0);
             det.timestamp_ms   = j.value("timestamp_ms",   (int64_t)0);
 
+            // Parse embedded IQ snapshot (present when AcquisitionApp >= schema 1.1)
+            if (j.contains("iq_snapshot") && j["iq_snapshot"].is_array()) {
+                det.iq_snapshot = j["iq_snapshot"].get<std::vector<float>>();
+                det.snapshot_sample_rate_sps =
+                    j.value("snapshot_sample_rate_sps", 0.0);
+            }
+
             on_detection_(det);
         } catch (const std::exception& ex) {
             spdlog::warn("AnalysisService: failed to parse detection: {}", ex.what());
@@ -165,7 +172,24 @@ AnalysisService::AnalysisService(const AppConfig& cfg)
     : cfg_(cfg)
     , engine_(cfg.engine)
     , collector_(cfg.amqp, cfg.collector, cfg.streaming_ip, cfg.engine.rank)
-{}
+{
+#ifdef ANALYSIS_WITH_DB
+    if (cfg.db.enabled) {
+        db_conn_str_ = "host="     + cfg.db.host +
+                       " port="    + std::to_string(cfg.db.port) +
+                       " dbname="  + cfg.db.dbname +
+                       " user="    + cfg.db.user +
+                       " password=" + cfg.db.password;
+        try {
+            db_conn_ = std::make_unique<pqxx::connection>(db_conn_str_);
+            spdlog::info("AnalysisService: connected to DB {}:{}/{}",
+                         cfg.db.host, cfg.db.port, cfg.db.dbname);
+        } catch (const std::exception& ex) {
+            spdlog::warn("AnalysisService: DB connection failed (will retry): {}", ex.what());
+        }
+    }
+#endif
+}
 
 AnalysisService::~AnalysisService()
 {
@@ -206,8 +230,25 @@ void AnalysisService::subscriptionLoop()
 {
     while (running_.load()) {
         auto on_det = [this](const Detection& d){
-            std::lock_guard<std::mutex> lk(q_mu_);
-            queue_.push(d);
+            // Skip re-analysis if this frequency was classified recently.
+            // With fast scanning (~8s/sweep) the same signal is detected dozens
+            // of times per minute; re-analyzing every hit starves the SCAN task.
+            int64_t bucket = static_cast<int64_t>(d.center_freq_hz / 100'000.0);
+            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            {
+                std::lock_guard<std::mutex> lk(q_mu_);
+                auto it = recent_analyzed_.find(bucket);
+                if (it != recent_analyzed_.end() &&
+                    (now_ms - it->second) < REANALYSIS_COOLDOWN_MS) {
+                    return;   // already analyzed this frequency recently
+                }
+                recent_analyzed_[bucket] = now_ms;
+                if (queue_.size() < MAX_QUEUE_DEPTH)
+                    queue_.push(d);
+                // If the queue is full, drop this detection — the signal will
+                // be re-detected and enqueued on the next sweep pass.
+            }
             q_cv_.notify_one();
         };
 
@@ -249,13 +290,47 @@ void AnalysisService::workerLoop()
     }
 }
 
+// Minimum ONNX confidence from the embedded snapshot to skip full IQ collection.
+// Above this threshold, the snapshot-only result is published immediately.
+// Below it, full collection + feature extraction runs for higher accuracy.
+static constexpr float FAST_PATH_THRESHOLD = 0.75f;
+
 void AnalysisService::processDetection(const Detection& d)
 {
     std::string req_id = generateUuid();
-    spdlog::info("AnalysisService: processing detection {:.3f} MHz req={}",
-                 d.center_freq_hz / 1e6, req_id);
+    spdlog::info("AnalysisService: processing {:.3f} MHz req={} snapshot={}",
+                 d.center_freq_hz / 1e6, req_id,
+                 d.iq_snapshot.empty() ? "no" : "yes");
 
-    // Collect IQ
+    // ── Fast path: ONNX directly from the embedded snapshot ──────────────────
+    // The snapshot is 1 024 IQ samples collected during the detection dwell —
+    // no SDR re-acquisition needed. If ONNX confidence exceeds the threshold,
+    // publish the result immediately (typically < 5 ms from detection receive).
+    if (!d.iq_snapshot.empty() && engine_.onnxLoaded()) {
+        AnalysisResult fast = engine_.analyzeSnapshot(
+            d.iq_snapshot,
+            d.snapshot_sample_rate_sps > 0 ? d.snapshot_sample_rate_sps
+                                           : cfg_.collector.analysis_sample_rate_sps,
+            d.center_freq_hz, req_id, cfg_.scanner_id);
+        fast.timestamp_ms = d.timestamp_ms;
+
+        if (fast.onnx_confidence >= FAST_PATH_THRESHOLD) {
+            spdlog::info("AnalysisService: fast-path {:.3f} MHz → {} ({:.0f}%) — "
+                         "skipping collection",
+                         d.center_freq_hz / 1e6,
+                         fast.digital_modulation.empty()
+                             ? fast.analog_modulation : fast.digital_modulation,
+                         fast.onnx_confidence * 100.f);
+            fast.fast_path = true;
+            publishResult(fast);
+            return;
+        }
+        spdlog::debug("AnalysisService: snapshot ONNX confidence {:.0f}% < {:.0f}% — "
+                      "falling back to full collection",
+                      fast.onnx_confidence * 100.f, FAST_PATH_THRESHOLD * 100.f);
+    }
+
+    // ── Slow path: full IQ collection + feature extraction ───────────────────
     auto iq = collector_.collect(d.center_freq_hz, d.bandwidth_hz, req_id);
     if (iq.empty()) {
         spdlog::warn("AnalysisService: no IQ collected for {:.3f} MHz",
@@ -266,11 +341,9 @@ void AnalysisService::processDetection(const Detection& d)
     double sr = collector_.lastSampleRate();
     if (sr <= 0) sr = cfg_.collector.analysis_sample_rate_sps;
 
-    // Run analysis pipeline
     AnalysisResult result = engine_.analyze(iq, sr, d.center_freq_hz,
                                              req_id, cfg_.scanner_id);
     result.timestamp_ms = d.timestamp_ms;
-
     publishResult(result);
 }
 
@@ -327,6 +400,7 @@ void AnalysisService::publishResult(const AnalysisResult& r)
     // Classification path metadata
     j["classification_path"]["rule_confidence"] = r.rule_confidence;
     j["classification_path"]["onnx_used"]       = r.onnx_used;
+    j["classification_path"]["fast_path"]       = r.fast_path;
     if (r.onnx_used)
         j["classification_path"]["onnx_confidence"] = r.onnx_confidence;
 
@@ -336,9 +410,83 @@ void AnalysisService::publishResult(const AnalysisResult& r)
         amqp_handler_->publish(body);
     }
 
-    spdlog::info("AnalysisService: published result for {:.3f} MHz → '{}'",
+#ifdef ANALYSIS_WITH_DB
+    persistResult(r);
+#endif
+
+    spdlog::info("AnalysisService: published result for {:.3f} MHz → '{}' ({})",
                  r.center_freq_hz / 1e6,
-                 r.hypotheses.empty() ? "unclassified" : r.hypotheses[0].system);
+                 r.hypotheses.empty() ? "unclassified" : r.hypotheses[0].system,
+                 r.fast_path ? "fast" : "slow");
 }
+
+#ifdef ANALYSIS_WITH_DB
+void AnalysisService::persistResult(const AnalysisResult& r)
+{
+    if (db_conn_str_.empty()) return;
+
+    // Reconnect if the connection was lost.
+    if (!db_conn_ || !db_conn_->is_open()) {
+        try {
+            db_conn_ = std::make_unique<pqxx::connection>(db_conn_str_);
+        } catch (const std::exception& ex) {
+            spdlog::warn("AnalysisService: DB reconnect failed: {}", ex.what());
+            db_conn_.reset();
+            return;
+        }
+    }
+
+    auto opt_str = [](const std::string& s) -> std::optional<std::string> {
+        return s.empty() ? std::nullopt : std::optional<std::string>{s};
+    };
+
+    std::optional<std::string> hyp_sys, hyp_cat;
+    std::optional<float> hyp_conf;
+    if (!r.hypotheses.empty()) {
+        hyp_sys  = r.hypotheses[0].system;
+        hyp_cat  = r.hypotheses[0].category;
+        hyp_conf = r.hypotheses[0].confidence;
+    }
+
+    try {
+        pqxx::work tx{*db_conn_};
+        tx.exec_params(
+            "INSERT INTO analysis_results "
+            " (detection_id,scanner_id,center_freq_hz,bandwidth_hz,snr_db,"
+            "  classified,analog_modulation,digital_modulation,"
+            "  symbol_rate_sps,bit_rate_bps,is_ofdm,is_fhss,is_burst,"
+            "  hypothesis_system,hypothesis_category,hypothesis_conf,"
+            "  rule_confidence,onnx_used,onnx_confidence,fast_path,reject_reason)"
+            " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+            r.detection_id,
+            r.scanner_id,
+            static_cast<int64_t>(r.center_freq_hz),
+            r.bandwidth_hz > 0 ? std::optional<int>{static_cast<int>(r.bandwidth_hz)}
+                               : std::nullopt,
+            r.snr_db,
+            r.classified,
+            opt_str(r.analog_modulation),
+            opt_str(r.digital_modulation),
+            r.symbol_rate_sps > 0 ? std::optional<double>{r.symbol_rate_sps} : std::nullopt,
+            r.bit_rate_bps   > 0 ? std::optional<double>{r.bit_rate_bps}    : std::nullopt,
+            r.is_ofdm,
+            r.is_fhss,
+            r.is_burst,
+            hyp_sys,
+            hyp_cat,
+            hyp_conf,
+            r.rule_confidence,
+            r.onnx_used,
+            r.onnx_used ? std::optional<float>{r.onnx_confidence} : std::nullopt,
+            r.fast_path,
+            opt_str(r.reject_reason)
+        );
+        tx.commit();
+    } catch (const std::exception& ex) {
+        spdlog::warn("AnalysisService: DB write failed: {}", ex.what());
+        db_conn_.reset();   // force reconnect on next call
+    }
+}
+#endif
 
 } // namespace analysis

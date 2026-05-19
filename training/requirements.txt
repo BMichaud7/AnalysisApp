@@ -1,0 +1,26 @@
+# Training pipeline for sdr_analysis OnnxClassifier
+# Tested with Python 3.10+, CUDA 12.x, RTX 2060 (6 GB VRAM)
+#
+# Install:
+#   pip install -r requirements.txt
+#
+# TorchSig optional but strongly recommended for dataset generation.
+# Without it the script falls back to a built-in pure-NumPy generator.
+
+torch>=2.1.0
+torchvision>=0.16.0          # not used directly, but torchsig needs it
+torchaudio>=2.1.0            # for resampling utilities
+
+# Dataset generation
+torchsig>=0.5.0              # RF signal generation + augmentation
+numpy>=1.24
+scipy>=1.11
+
+# Export / validation
+onnx>=1.15.0
+onnxruntime>=1.17.0          # CPU validation of exported model
+# onnxruntime-gpu            # uncomment for GPU validation
+
+# Utilities
+tqdm>=4.66
+matplotlib>=3.7              # optional: training curves

@@ -39,6 +39,7 @@ by the C++ OnnxClassifier (include/OnnxClassifier.hpp).
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -145,6 +146,19 @@ def build_tensors(args) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
     return X, y, cn
 
 
+# ── Mixup augmentation ────────────────────────────────────────────────────────
+
+def mixup_batch(X: torch.Tensor, y: torch.Tensor, alpha: float = 0.3):
+    """Beta-distributed linear interpolation between pairs of samples."""
+    lam  = float(np.random.beta(alpha, alpha))
+    perm = torch.randperm(len(X), device=X.device)
+    return lam * X + (1 - lam) * X[perm], y, y[perm], lam
+
+
+def mixup_loss(crit, logits, y_a, y_b, lam):
+    return lam * crit(logits, y_a) + (1 - lam) * crit(logits, y_b)
+
+
 # ── Training loop ─────────────────────────────────────────────────────────────
 
 def train(model:      nn.Module,
@@ -152,23 +166,37 @@ def train(model:      nn.Module,
           val_loader: DataLoader,
           device:     torch.device,
           epochs:     int,
-          lr:         float = 1e-3) -> nn.Module:
+          lr:         float = 1e-3,
+          use_mixup:  bool  = True,
+          warmup_epochs: int = 5) -> nn.Module:
 
-    opt   = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    sched = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-    crit  = nn.CrossEntropyLoss()
-    best_acc  = 0.0
+    opt  = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+
+    # Linear warmup then cosine annealing
+    def lr_lambda(ep):
+        if ep < warmup_epochs:
+            return float(ep + 1) / warmup_epochs
+        prog = (ep - warmup_epochs) / max(1, epochs - warmup_epochs)
+        return 0.5 * (1.0 + math.cos(math.pi * prog))
+
+    sched = optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+    crit  = nn.CrossEntropyLoss(label_smoothing=0.1)   # reduces overconfidence
+    best_acc   = 0.0
     best_state = None
 
     for epoch in range(1, epochs + 1):
-        # Train
         model.train()
         train_loss = 0.0
         for X_b, y_b in tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=False):
             X_b, y_b = X_b.to(device), y_b.to(device)
             opt.zero_grad()
-            logits = model(X_b)
-            loss   = crit(logits, y_b)
+            if use_mixup and epoch > warmup_epochs:
+                X_b, y_a, y_b2, lam = mixup_batch(X_b, y_b)
+                logits = model(X_b)
+                loss   = mixup_loss(crit, logits, y_a, y_b2, lam)
+            else:
+                logits = model(X_b)
+                loss   = crit(logits, y_b)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -177,7 +205,6 @@ def train(model:      nn.Module,
         train_loss /= len(loader.dataset)
         sched.step()
 
-        # Validate
         model.eval()
         correct, total = 0, 0
         with torch.no_grad():
@@ -188,7 +215,9 @@ def train(model:      nn.Module,
                 total   += len(y_b)
 
         val_acc = correct / total
-        print(f"  Epoch {epoch:3d}  loss={train_loss:.4f}  val_acc={val_acc:.3f}")
+        cur_lr  = opt.param_groups[0]["lr"]
+        print(f"  Epoch {epoch:3d}  loss={train_loss:.4f}  val_acc={val_acc:.3f}  "
+              f"lr={cur_lr:.2e}")
 
         if val_acc > best_acc:
             best_acc   = val_acc
@@ -305,7 +334,8 @@ def main() -> None:
 
     # ── Train ─────────────────────────────────────────────────────────────────
     model = train(model, train_loader, val_loader, device,
-                  epochs=args.epochs, lr=args.lr)
+                  epochs=args.epochs, lr=args.lr,
+                  use_mixup=True, warmup_epochs=min(5, args.epochs // 10))
 
     # ── Test + report ─────────────────────────────────────────────────────────
     print("\n── Test Set Evaluation ──")

@@ -8,6 +8,12 @@
 #include <queue>
 #include <condition_variable>
 #include <memory>
+#include <unordered_map>
+#include <vector>
+
+#ifdef ANALYSIS_WITH_DB
+#include <pqxx/pqxx>
+#endif
 
 // Forward declarations
 namespace proton { class container; }
@@ -23,6 +29,12 @@ struct Detection {
     double      bandwidth_hz;
     double      power_db;
     int64_t     timestamp_ms;
+
+    // 1 024-sample IQ snapshot from the acquiring dwell (interleaved float32 I,Q).
+    // Non-empty when AcquisitionApp embeds it in the RF_DETECTION message.
+    // Used by the ONNX fast path to classify without re-acquiring the SDR.
+    std::vector<float> iq_snapshot;
+    double             snapshot_sample_rate_sps{0.0};
 };
 
 class AnalysisService {
@@ -55,8 +67,25 @@ private:
     std::queue<Detection> queue_;
     void workerLoop();
 
+    // Frequency-dedup: skip re-analysis of a recently-classified frequency.
+    // Key = freq_hz rounded to 100 kHz bucket. Value = last-enqueued epoch ms.
+    std::unordered_map<int64_t, int64_t> recent_analyzed_;
+    // 5-minute cooldown: each unique signal is analyzed at most once per 5 min.
+    static constexpr int64_t REANALYSIS_COOLDOWN_MS = 300'000;
+    // Cap the backlog: 3 items × ~165ms slow-path = 500ms worst case,
+    // well within the 3s analysis_pause_ms window.
+    static constexpr size_t  MAX_QUEUE_DEPTH        = 3;
+
     void processDetection(const Detection& d);
     void publishResult(const AnalysisResult& r);
+
+#ifdef ANALYSIS_WITH_DB
+    // Persistent connection to analysis_results table.
+    // Owned exclusively by workerLoop — no locking needed.
+    std::unique_ptr<pqxx::connection> db_conn_;
+    std::string db_conn_str_;
+    void persistResult(const AnalysisResult& r);
+#endif
 };
 
 } // namespace analysis

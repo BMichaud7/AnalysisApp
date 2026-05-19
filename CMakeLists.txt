@@ -124,6 +124,48 @@ if(WITH_ONNX)
     endif()
 endif()
 
+# ── libpqxx (optional — persists analysis_results to PostgreSQL) ──────────────
+# Falls back to building libpqxx 7.9 from source when the system package is
+# unavailable (e.g. CentOS Stream 10 / RHEL 10 — EPEL 10 has no libpqxx-devel).
+# Prerequisite in all cases: libpq-devel (PostgreSQL C client).
+option(WITH_DB "Enable PostgreSQL result persistence via libpqxx" OFF)
+if(WITH_DB)
+    pkg_check_modules(PQXX QUIET IMPORTED_TARGET libpqxx)
+    if(PQXX_FOUND)
+        message(STATUS "[AnalysisApp] libpqxx: system package ${PQXX_VERSION}")
+    else()
+        find_library(PQXX_LIB pqxx)
+        find_path(PQXX_INCLUDE_DIR pqxx/pqxx)
+        if(PQXX_LIB AND PQXX_INCLUDE_DIR)
+            add_library(PkgConfig::PQXX INTERFACE IMPORTED)
+            target_include_directories(PkgConfig::PQXX INTERFACE ${PQXX_INCLUDE_DIR})
+            target_link_libraries(PkgConfig::PQXX INTERFACE ${PQXX_LIB})
+            set(PQXX_FOUND TRUE)
+            message(STATUS "[AnalysisApp] libpqxx: found without pkg-config")
+        else()
+            # Build libpqxx from source; requires libpq-devel
+            find_library(LIBPQ_LIB pq)
+            if(NOT LIBPQ_LIB)
+                message(FATAL_ERROR "[AnalysisApp] libpq not found — required to build libpqxx.\n"
+                    "  Ubuntu: apt-get install libpq-dev\n"
+                    "  CentOS/RHEL: dnf install libpq-devel")
+            endif()
+            message(STATUS "[AnalysisApp] libpqxx not found — fetching 7.9.2 from GitHub")
+            include(FetchContent)
+            FetchContent_Declare(pqxx
+                GIT_REPOSITORY https://github.com/jtv/libpqxx.git
+                GIT_TAG        7.9.2
+                GIT_SHALLOW    TRUE)
+            set(PQXX_LIBRARIES_ONLY ON  CACHE BOOL "" FORCE)
+            set(BUILD_DOC          OFF CACHE BOOL "" FORCE)
+            set(BUILD_TESTING      OFF CACHE BOOL "" FORCE)
+            FetchContent_MakeAvailable(pqxx)
+            add_library(PkgConfig::PQXX ALIAS pqxx)
+            set(PQXX_FOUND TRUE)
+        endif()
+    endif()
+endif()
+
 # ── Library target ────────────────────────────────────────────────────────────
 set(ANALYSIS_SOURCES
     src/Config.cpp
@@ -159,6 +201,10 @@ endif()
 if(WITH_ONNX)
     target_link_libraries(analysis_lib PUBLIC onnxruntime::onnxruntime)
     target_compile_definitions(analysis_lib PUBLIC ANALYSIS_WITH_ONNX=1)
+endif()
+if(WITH_DB)
+    target_link_libraries(analysis_lib PUBLIC PkgConfig::PQXX)
+    target_compile_definitions(analysis_lib PUBLIC ANALYSIS_WITH_DB=1)
 endif()
 
 # Proton linkage (cmake package path vs pkg-config path)
@@ -197,6 +243,7 @@ add_executable(analysis_tests
     tests/unit/test_feature_extractor.cpp
     tests/unit/test_modulation_classifier.cpp
     tests/unit/test_protocol_mapper.cpp
+    tests/unit/test_analysis_engine.cpp
 )
 target_link_libraries(analysis_tests PRIVATE
     analysis_lib
@@ -212,4 +259,5 @@ message(STATUS "│  Build type    : ${CMAKE_BUILD_TYPE}                        
 message(STATUS "│  FFTW3f        : ${FFTW3F_VERSION}                            │")
 message(STATUS "│  qpid-proton   : ${PROTON_VERSION}                            │")
 message(STATUS "│  ONNX Runtime  : ${WITH_ONNX}                                 │")
+message(STATUS "│  PostgreSQL DB : ${WITH_DB}                                   │")
 message(STATUS "└───────────────────────────────────────────────────────────────┘")

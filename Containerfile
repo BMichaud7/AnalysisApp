@@ -41,6 +41,8 @@ RUN dnf install -y \
         libuuid-devel \
         # fmt (needed by spdlog when using pkg-config path)
         fmt-devel \
+        # PostgreSQL C client (libpqxx 7.9 is built from source via CMake FetchContent)
+        libpq-devel \
     && dnf clean all
 
 # Clone SdrSdk and SdrTaskApi (sibling dependencies)
@@ -62,7 +64,7 @@ COPY tests/             tests/
 COPY config/            config/
 COPY build.sh           .
 
-# Build release with ONNX Runtime for ML-based classification
+# Build release with ONNX Runtime and PostgreSQL persistence
 RUN cmake -B build \
         -S . \
         -DCMAKE_BUILD_TYPE=Release \
@@ -70,6 +72,7 @@ RUN cmake -B build \
         -DFETCHCONTENT_QUIET=OFF \
         -DWITH_ONNX=ON \
         -DONNXRUNTIME_ROOT=/opt/onnxruntime \
+        -DWITH_DB=ON \
     && cmake --build build --parallel "$(nproc)" \
     && cmake --install build
 
@@ -94,6 +97,7 @@ RUN dnf install -y epel-release && \
         libuuid \
         fmt \
         cyrus-sasl-plain \
+        libpq \
     && dnf clean all
 
 # tini is not in EPEL 10 — fetch static binary directly

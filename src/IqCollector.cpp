@@ -140,6 +140,10 @@ public:
         msg.body(request_body_);
         msg.content_type("application/json");
         msg.durable(false);
+        // Set reply_to so the controller routes the response to our dedicated
+        // queue instead of the shared default — prevents cross-app message theft.
+        if (!cfg_.response_queue.empty())
+            msg.reply_to(cfg_.response_queue);
         s.send(msg);
         spdlog::debug("IqCollector: sent request ({} bytes)", request_body_.size());
         // Fire-and-forget (e.g. TASK_STOP): close after sending, no reply needed

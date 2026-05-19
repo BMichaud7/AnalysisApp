@@ -5,12 +5,25 @@ Subscribes to IQ streams from **SdrResourceManager**, performs five-layer automa
 ## Architecture
 
 ```
-SdrResourceManager ──UDP IQ──► AnalysisApp ──AMQP──► rf.analysis topic
-                                    │
-                  FeatureExtractor (FFT, cumulants, OFDM CP, FHSS)
-                  ModulationClassifier (analog / digital / structure)
-                  ProtocolMapper (59-entry protocol database)
-                  OnnxClassifier (optional — RadioML-trained CNN)
+AcquisitionApp ──RF_DETECTION (+ IQ snapshot)──► rf.detections
+                                                       │
+                        ┌──────────────────────────────┘
+                        │
+              ┌─────────▼──────────────────────────────────────┐
+              │  AnalysisService — per-detection dispatch       │
+              │                                                  │
+              │  ① Fast path  (IQ snapshot present, ~5 ms)     │
+              │    ONNX classifier on embedded 1 024-sample IQ  │
+              │    → publish immediately if confidence ≥ 75%    │
+              │                                                  │
+              │  ② Slow path  (low ONNX confidence, ~265 ms)   │
+              │    Request NARROWBAND task from SdrResourceMgr   │
+              │    → collect 65 536 samples at 2 MSPS           │
+              │    → FeatureExtractor + ONNX (parallel)         │
+              │    → publish result                              │
+              └────────────────────────────────────────────────-┘
+                        │
+               AMQP ──► rf.analysis topic
 ```
 
 ## Supported Modulations & Protocols
@@ -109,8 +122,14 @@ SNR sensitivity (RTL-SDR impairments + AWGN, 3 realisations × 7 signals):
 rule-based path — this is the gap the ONNX fallback is designed to fill.
 FM/AM/OFDM/FSK/CSS are 100% across all profiles including OTA.
 
-Latency: 5–7 ms per classification window (Python harness, single-threaded).
-C++ engine is ~1–3 ms on the same hardware.
+Latency (C++ engine):
+
+| Path | Trigger | Total latency |
+|------|---------|---------------|
+| Fast (ONNX from snapshot, confidence ≥ 75%) | ~65% of signals | **~5 ms** |
+| Slow (full collection + features) | ~35% of signals | **~265 ms** |
+
+The fast path fires before any SDR re-acquisition — ONNX runs on the 1 024-sample IQ snapshot embedded in the `RF_DETECTION` AMQP message. The slow path collects 65 536 fresh samples at 2 MSPS and runs the full feature extraction + ONNX pipeline in parallel.
 
 ---
 
@@ -158,7 +177,7 @@ pip install -r tools/ml/requirements.txt   # torch, onnx, onnxruntime-gpu, …
 
 ## Testing
 
-Run the 27 unit tests in a container — no broker, SDR, or local deps needed:
+Run the 33 unit tests in a container — no broker, SDR, or local deps needed:
 
 ```bash
 podman build --target test -t sdr-analysis:test .
@@ -166,7 +185,7 @@ podman build --target test -t sdr-analysis:test .
 
 The `Containerfile` is multi-stage (CentOS Stream 10). `--target test` builds the binary and runs `ctest` inside the builder, exiting 0 on success.
 
-Tests cover: `FeatureExtractor` (cumulant values, OFDM CP detector, SNR, chirp), `ModulationClassifier` (all modulation branches, PSK discriminants), `ProtocolMapper` (hypothesis ranking, frequency database).
+Tests cover: `FeatureExtractor` (cumulant values, OFDM CP detector, SNR, chirp), `ModulationClassifier` (all modulation branches, PSK discriminants), `ProtocolMapper` (hypothesis ranking, frequency database), `AnalysisEngine` (fast-path `analyzeSnapshot()`, `onnxLoaded()` when no model configured).
 
 Run the Python harness against hardware impairment profiles:
 
@@ -189,10 +208,14 @@ git clone https://github.com/BMichaud7/SdrTaskApi.git
 cd AnalysisApp
 ./build.sh
 
-# 3. With ONNX Runtime ML support
+# 3. With ONNX Runtime ML support + PostgreSQL persistence
 cmake -B build -DWITH_ONNX=ON \
-      -DONNXRUNTIME_ROOT=/opt/onnxruntime-linux-x64-1.17.3
+      -DONNXRUNTIME_ROOT=/opt/onnxruntime-linux-x64-1.17.3 \
+      -DWITH_DB=ON
 cmake --build build --parallel
+
+# PostgreSQL schema (run once):
+psql -U sdr -d sdr_scanner -f schema/init.sql
 
 # 4. Run tests
 ./build.sh --tests
@@ -330,7 +353,7 @@ Each pod announces its own `POD_IP` to SdrResourceManager; tasks are distributed
 | `streaming_ip` | `127.0.0.1` | IP to bind UDP IQ receive socket (`0.0.0.0` in containers) |
 | `amqp/url` | — | AMQP 1.0 broker URL |
 | `collector/analysis_sample_rate_sps` | `2000000` | IQ sample rate expected from SdrResourceManager |
-| `collector/collect_samples` | `1000000` | Samples per analysis window |
+| `collector/collect_samples` | `65536` | Samples per slow-path collection window (32 ms at 2 MSPS). The fast path uses the embedded `iq_snapshot` instead and does not collect. |
 | `collector/analysis_timeout_ms` | `5000` | Max wait for IQ collection |
 | `engine/fft_size` | `4096` | FFT size for spectral features |
 | `engine/snr_threshold_db` | `5.0` | Minimum SNR to attempt classification |
@@ -338,9 +361,18 @@ Each pod announces its own `POD_IP` to SdrResourceManager; tasks are distributed
 | `engine/onnx/model_path` | *(empty)* | Path to `.onnx` model file — omit to disable ONNX |
 | `engine/onnx/classes_path` | *(empty)* | Path to `.classes.json` label file |
 | `engine/onnx/use_gpu` | `true` | Try CUDA execution provider, fall back to CPU |
+| `engine/onnx/use_tensorrt` | `true` | Try TensorRT EP before CUDA EP (3× faster on RTX; requires `use_gpu=true`) |
+| `engine/onnx/tensorrt_fp16` | `true` | Use fp16 Tensor Core kernels (RTX 2060+) |
+| `engine/onnx/tensorrt_cache_mb` | `128` | TRT engine compile cache size (MB) |
 | `engine/onnx/input_len` | `1024` | IQ samples per inference window |
-| `engine/onnx/fallback_confidence_threshold` | `0.60` | Run ONNX when rule confidence is below this value |
-| `engine/onnx/fallback_on_unknown` | `true` | Always run ONNX when rule-based returns UNKNOWN |
+| `engine/onnx/max_batch` | `8` | Max signals batched per `classifyBatch()` call |
+| `engine/onnx/fallback_confidence_threshold` | `0.60` | Run ONNX in slow path when rule confidence is below this value |
+| `engine/onnx/fallback_on_unknown` | `true` | Always run ONNX slow path when rule-based returns UNKNOWN |
+| `database/host` | `localhost` | PostgreSQL host — omit `<database>` block to disable persistence |
+| `database/port` | `5432` | PostgreSQL port |
+| `database/name` | `sdr_scanner` | Database name (must have `analysis_results` table from `schema/init.sql`) |
+| `database/user` | `sdr` | PostgreSQL user |
+| `database/password` | — | PostgreSQL password |
 
 ---
 
@@ -368,24 +400,47 @@ The exported `.onnx` file and companion `.classes.json` are loaded by `OnnxClass
 
 ## Classification Path
 
+Two paths depending on whether the incoming `RF_DETECTION` message carries an `iq_snapshot`:
+
 ```
-                    ┌─────────────────────────────┐
-IQ buffer ─────────►│  Rule-based classifier       │ always runs (~1–3 ms)
-                    │  FM / AM / OFDM / FSK / CSS  │
-                    └────────────┬────────────────-┘
-                                 │ rule_confidence
-                    ┌────────────▼────────────────-┐
-                    │  < threshold OR "UNKNOWN"?    │ configurable per XML
-                    └────────────┬────────────────-┘
-                          yes    │    no
-               ┌────────────────┘    └──────────────────────┐
+RF_DETECTION received
+        │
+        ├─ iq_snapshot present AND ONNX loaded?
+        │         │
+        │         ▼ FAST PATH (~5 ms total)
+        │   ┌─────────────────────┐
+        │   │  ONNX on snapshot   │  0.3 ms TRT / 2 ms CUDA EP
+        │   │  (1 024 samples)    │
+        │   └────────┬────────────┘
+        │            │ confidence ≥ 75%?
+        │            ├── yes → publish immediately
+        │            └── no  → fall through to slow path
+        │
+        └─ SLOW PATH (~165 ms total)
+                  │
+                  ▼
+        ┌─────────────────────────────────────────────────┐
+        │  Collect 65 536 samples at 2 MSPS (32 ms)       │
+        └─────────────────────────┬───────────────────────┘
+                                  │  (ONNX also runs in
+                                  │   parallel on this IQ)
+                    ┌─────────────▼─────────────┐
+                    │  Rule-based classifier     │ ~20–50 ms
+                    │  FM / AM / OFDM / FSK / CSS│
+                    └──────────────┬────────────-┘
+                                   │ rule_confidence
+                    ┌──────────────▼────────────-┐
+                    │  < threshold OR "UNKNOWN"?  │
+                    └──────────────┬────────────-┘
+                          yes      │       no
+               ┌──────────────────┘   └─────────────────────┐
                ▼                                            ▼
     ┌─────────────────────┐                    ┌───────────────────────┐
-    │  ONNX classifier    │ (~0.5–2 ms GPU)    │  Rule result used     │
-    │  (RadioML CNN)      │                    │  onnx_used = false    │
-    └─────────┬───────────┘                    └───────────────────────┘
-              │ modulation, onnx_confidence
-              ▼
+    │  ONNX result        │ (already done,     │  Rule result used     │
+    │  (parallel future)  │  just .get())      │  onnx_used = false    │
+    └──────────┬──────────┘                    └───────────────────────┘
+               │
+               ▼
     ┌─────────────────────┐
     │  Protocol mapper    │
     │  (59-entry DB)      │
@@ -410,9 +465,12 @@ ONNX results and the rule path that fired are reported in every published JSON:
 "classification_path": {
   "rule_confidence": 0.65,
   "onnx_used": true,
-  "onnx_confidence": 0.91
+  "onnx_confidence": 0.91,
+  "fast_path": true
 }
 ```
+
+`fast_path: true` means the result came from the embedded IQ snapshot (~5 ms) without re-acquiring the SDR. This field is also stored in the `fast_path` column of the `analysis_results` PostgreSQL table and exposed in the `classification_path_stats` view.
 
 ---
 

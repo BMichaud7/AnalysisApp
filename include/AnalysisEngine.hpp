@@ -8,6 +8,7 @@
 #include "OnnxClassifier.hpp"
 #include <vector>
 #include <string>
+#include <future>
 
 namespace analysis {
 
@@ -15,11 +16,23 @@ class AnalysisEngine {
 public:
     explicit AnalysisEngine(const EngineConfig& cfg);
 
+    // Full analysis: feature extraction + rule classifier + ONNX (parallel).
     AnalysisResult analyze(const std::vector<float>& iq_cf32,
                            double sample_rate_sps,
                            double center_freq_hz,
                            const std::string& detection_id,
                            const std::string& scanner_id) const;
+
+    // Fast-path: ONNX only, no feature extraction, no SDR re-acquisition.
+    // Returns a result with onnx_used=true and onnx_confidence set.
+    // The caller checks onnx_confidence and falls back to analyze() if too low.
+    AnalysisResult analyzeSnapshot(const std::vector<float>& iq_snapshot,
+                                   double sample_rate_sps,
+                                   double center_freq_hz,
+                                   const std::string& detection_id,
+                                   const std::string& scanner_id) const;
+
+    bool onnxLoaded() const { return onnx_.loaded(); }
 
 private:
     // Returns 0–1 certainty of the rule-based result.

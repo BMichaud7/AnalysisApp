@@ -17,7 +17,10 @@ struct AmqpConfig {
 
 struct CollectorConfig {
     double      analysis_sample_rate_sps = 2'000'000.0; // SR used for IQ collection
-    int         collect_samples          = 1'000'000;   // samples per analysis window
+    // 65 536 samples at 2 MSPS = 32 ms — enough for cumulants, symbol-rate
+    // estimation, and OFDM/FHSS detection down to ~4 800 baud.  Increase to
+    // 131 072 if you need reliable FHSS detection at hop rates < 100 Hz.
+    int         collect_samples          = 65'536;
     int         analysis_timeout_ms      = 5000;        // max wait for IQ
 };
 
@@ -29,10 +32,20 @@ struct EngineConfig {
     OnnxConfig  onnx;               // optional ML fallback path
 };
 
+struct DbConfig {
+    std::string host     = "localhost";
+    int         port     = 5432;
+    std::string dbname   = "sdr_scanner";
+    std::string user     = "sdr";
+    std::string password = "";
+    bool        enabled  = false;   // set true when <database> block present in XML
+};
+
 struct AppConfig {
     AmqpConfig      amqp;
     CollectorConfig collector;
     EngineConfig    engine;
+    DbConfig        db;
     std::string     scanner_id       = "analysis-0";
     std::string     streaming_ip     = "127.0.0.1";
 };

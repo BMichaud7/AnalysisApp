@@ -56,6 +56,8 @@ struct AnalysisResult {
                                   // (1.0 = structural detection, 0.0 = UNKNOWN)
     bool  onnx_used = false;      // true if ONNX classifier overrode or augmented
     float onnx_confidence = 0.f;  // softmax probability from ONNX (if used)
+    bool  fast_path = false;      // true = classified from embedded IQ snapshot (~5ms)
+                                  // false = full IQ collection + feature extraction (~165ms)
 };
 
 } // namespace analysis
