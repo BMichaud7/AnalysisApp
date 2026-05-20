@@ -42,7 +42,7 @@ struct EngineConfig {
     double     fft_size            = 4096; ///< FFT size for feature extraction.
     double     guard_band_fraction = 0.1;  ///< Fraction of bandwidth treated as roll-off guard.
     double     snr_threshold_db    = 5.0;  ///< Minimum SNR to attempt classification (dB).
-    int        rank                = 1;    ///< Task rank submitted to SdrResourceManager.
+    int        rank                = 2;    ///< Task rank: 2=Ana (preempts Acq=1, preempted by DF=3).
     OnnxConfig onnx;                       ///< Optional ONNX classifier configuration.
 };
 

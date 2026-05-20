@@ -62,7 +62,7 @@ data:
       <engine>
         <fft_size>4096</fft_size>
         <snr_threshold_db>5.0</snr_threshold_db>
-        <rank>1</rank>
+        <rank>2</rank>
       </engine>
     </sdr_analysis>
 
