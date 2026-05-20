@@ -1,5 +1,6 @@
 #include "AnalysisService.hpp"
 
+#include <sdr/Base64.hpp>
 #include <proton/container.hpp>
 #include <proton/message.hpp>
 #include <proton/messaging_handler.hpp>
@@ -109,8 +110,15 @@ public:
             det.power_db       = j.value("power_db",       0.0);
             det.timestamp_ms   = j.value("timestamp_ms",   (int64_t)0);
 
-            // Parse embedded IQ snapshot (present when AcquisitionApp >= schema 1.1)
-            if (j.contains("iq_snapshot") && j["iq_snapshot"].is_array()) {
+            // Parse embedded IQ snapshot.
+            // Schema >= 1.2: base64-encoded raw float32 bytes (smaller, faster).
+            // Schema  = 1.1: JSON float array (backward compat with old AcquisitionApp).
+            if (j.contains("iq_snapshot_b64") && j["iq_snapshot_b64"].is_string()) {
+                det.iq_snapshot = sdr::base64::decodeFloats(
+                    j["iq_snapshot_b64"].get<std::string>());
+                det.snapshot_sample_rate_sps =
+                    j.value("snapshot_sample_rate_sps", 0.0);
+            } else if (j.contains("iq_snapshot") && j["iq_snapshot"].is_array()) {
                 det.iq_snapshot = j["iq_snapshot"].get<std::vector<float>>();
                 det.snapshot_sample_rate_sps =
                     j.value("snapshot_sample_rate_sps", 0.0);

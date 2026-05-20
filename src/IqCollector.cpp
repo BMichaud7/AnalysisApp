@@ -37,8 +37,9 @@ using json = nlohmann::json;
 using namespace std::chrono;
 
 // ── JSON encoding for task request ────────────────────────────────────────────
-// dest_ip only — controller allocates a port from its pool and returns it in
-// streams[0].udp_port of the TASK_RESPONSE.  We bind AFTER getting that port.
+// dest_ip + optional prebound_port: when prebound_port > 0 the socket is already
+// listening before the request is sent, so the controller streams to it immediately
+// without the data-loss race where streaming starts before bind() completes.
 
 static std::string buildTaskRequestJson(const std::string& request_id,
                                          double center_freq_hz,
@@ -46,10 +47,15 @@ static std::string buildTaskRequestJson(const std::string& request_id,
                                          double sample_rate_sps,
                                          int64_t duration_ms,
                                          const std::string& dest_ip,
-                                         int rank)
+                                         int rank,
+                                         uint16_t prebound_port = 0)
 {
     auto ts = duration_cast<milliseconds>(
                   system_clock::now().time_since_epoch()).count();
+
+    json streaming = {{"dest_ip", dest_ip}};
+    if (prebound_port > 0)
+        streaming["dest_ports"] = json::array({static_cast<int>(prebound_port)});
 
     json j = {
         {"msg_type",        "TASK_REQUEST"},
@@ -68,7 +74,7 @@ static std::string buildTaskRequestJson(const std::string& request_id,
             {"sample_rate_sps", sample_rate_sps},
             {"rx_count",        1}
         }},
-        {"streaming", {{"dest_ip", dest_ip}}}
+        {"streaming", streaming}
     };
     return j.dump();
 }
@@ -187,8 +193,6 @@ private:
 
 // ── UDP helpers ───────────────────────────────────────────────────────────────
 
-// Bind to the specific port the controller allocated — called AFTER parsing
-// streams[0].udp_port from the TASK_RESPONSE, never before.
 static int openBoundUdpSocket(int port)
 {
     int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
@@ -252,8 +256,7 @@ static std::vector<float> receiveIq(int udp_fd, int target_samples, int timeout_
 
         const float* samples = reinterpret_cast<const float*>(
                                    buf.data() + sdr::IQ_PACKET_HEADER_SIZE);
-        for (int i = 0; i < n_samp * 2; ++i)
-            iq.push_back(samples[i]);
+        iq.insert(iq.end(), samples, samples + n_samp * 2);
     }
 
     return iq;
@@ -284,9 +287,23 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
     int64_t dur_ms = static_cast<int64_t>(
                          (double)col_cfg_.collect_samples / sr * 1000.0) + 500;
 
-    // Step 1: submit task — no port specified, controller allocates from pool
+    // Pre-bind the UDP socket BEFORE submitting the task so the controller can
+    // stream to a ready socket from the very first packet — same fix applied to
+    // TaskManagerIqSource to eliminate the AMQP-latency data-loss race.
+    int prebound_fd   = openBoundUdpSocket(0);  // port 0 → OS assigns ephemeral
+    uint16_t prebound_port = 0;
+    if (prebound_fd >= 0) {
+        struct sockaddr_in sa{};
+        socklen_t sl = sizeof(sa);
+        if (getsockname(prebound_fd, reinterpret_cast<sockaddr*>(&sa), &sl) == 0)
+            prebound_port = ntohs(sa.sin_port);
+        spdlog::debug("IqCollector: pre-bound UDP port {}", prebound_port);
+    }
+
+    // Step 1: submit task — include pre-bound port so controller honours it
     std::string req_json = buildTaskRequestJson(
-        request_id, center_freq_hz, bw, sr, dur_ms, local_ip_, task_rank_);
+        request_id, center_freq_hz, bw, sr, dur_ms, local_ip_, task_rank_,
+        prebound_port);
 
     RpcHandler::BrokerCfg bcfg{
         amqp_cfg_.url, amqp_cfg_.username, amqp_cfg_.password,
@@ -324,8 +341,11 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
     if (timed_out) container.stop();
     if (amqp_thread.joinable()) amqp_thread.join();
 
+    auto closePreboundFd = [&]{ if (prebound_fd >= 0) { ::close(prebound_fd); prebound_fd = -1; } };
+
     if (!error_body.empty()) {
         spdlog::error("IqCollector: AMQP error: {}", error_body);
+        closePreboundFd();
         return {};
     }
 
@@ -338,6 +358,7 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
         if (!accepted) {
             spdlog::warn("IqCollector: task rejected: {}",
                          j.value("reject_reason", "unknown"));
+            closePreboundFd();
             return {};
         }
         accepted_task_id = j.value("task_id", "");
@@ -351,23 +372,33 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
 
         if (udp_port == 0) {
             spdlog::error("IqCollector: ACCEPTED response missing streams[0].udp_port");
+            closePreboundFd();
             return {};
         }
         spdlog::debug("IqCollector: task accepted id='{}' udp_port={} sr={:.0f} Hz",
                       accepted_task_id, udp_port, last_sr_);
     } catch (const std::exception& ex) {
         spdlog::error("IqCollector: failed to parse TASK_RESPONSE: {}", ex.what());
+        closePreboundFd();
         return {};
     }
 
-    // Step 3: bind to the controller-allocated port
-    int udp_fd = openBoundUdpSocket(udp_port);
-    if (udp_fd < 0) {
-        spdlog::error("IqCollector: failed to bind UDP socket on port {}: {}",
-                      udp_port, strerror(errno));
-        return {};
+    // Step 3: use pre-bound socket if controller honoured our port, else re-bind.
+    int udp_fd;
+    if (prebound_fd >= 0 && prebound_port > 0 && udp_port == prebound_port) {
+        udp_fd = prebound_fd;
+        prebound_fd = -1;  // ownership transferred
+        spdlog::debug("IqCollector: controller honoured pre-bound port {}", udp_port);
+    } else {
+        if (prebound_fd >= 0) { ::close(prebound_fd); prebound_fd = -1; }
+        udp_fd = openBoundUdpSocket(udp_port);
+        if (udp_fd < 0) {
+            spdlog::error("IqCollector: failed to bind UDP socket on port {}: {}",
+                          udp_port, strerror(errno));
+            return {};
+        }
+        spdlog::info("IqCollector: re-bound UDP to controller-assigned port {}", udp_port);
     }
-    spdlog::info("IqCollector: UDP bound on port {}", udp_port);
 
     // Step 4: receive IQ
     auto iq = receiveIq(udp_fd, col_cfg_.collect_samples,
