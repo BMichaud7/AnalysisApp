@@ -38,7 +38,7 @@ data:
       <amqp>
         <url>amqp://activemq-service.sdr-system.svc.cluster.local:5672</url>
         <username>sdr_ctrl</username>
-        <password>CHANGE_ME</password>
+        <password>${AMQP_PASSWORD}</password>
         <detections_topic>rf.detections</detections_topic>
         <analysis_topic>rf.analysis</analysis_topic>
         <task_request_queue>sdr.task.request</task_request_queue>
@@ -51,6 +51,14 @@ data:
         <analysis_timeout_ms>5000</analysis_timeout_ms>
       </collector>
 
+      <database>
+        <host>postgres-service.sdr-system.svc.cluster.local</host>
+        <port>5432</port>
+        <name>sdr_scanner</name>
+        <user>sdr</user>
+        <password>${DB_PASSWORD}</password>
+      </database>
+
       <engine>
         <fft_size>4096</fft_size>
         <snr_threshold_db>5.0</snr_threshold_db>
@@ -59,20 +67,9 @@ data:
     </sdr_analysis>
 
 ---
-# ── Secret: AMQP credentials ───────────────────────────────────────────
-# Create with:
-#   kubectl create secret generic analysis-amqp-credentials \
-#     -n sdr-system --from-literal=username=sdr_ctrl \
-#     --from-literal=password=CHANGE_ME
-apiVersion: v1
-kind: Secret
-metadata:
-  name: analysis-amqp-credentials
-  namespace: sdr-system
-type: Opaque
-stringData:
-  username: sdr_ctrl
-  password: CHANGE_ME  # !! Set before applying — never commit a real password
+# ── Credentials come from the shared sdr-credentials Secret ───────────
+# Apply SdrResourceManager/k8s/secrets.yaml first.
+# See that file for setup instructions.
 
 ---
 # ── Service: UDP IQ receive + internal ────────────────────────────────
@@ -130,9 +127,38 @@ spec:
     spec:
       terminationGracePeriodSeconds: 30
 
+      initContainers:
+        - name: render-config
+          image: python:3.12-alpine
+          command:
+            - python3
+            - -c
+            - |
+              import os, string
+              tmpl = open('/tmpl/analysis.xml').read()
+              out  = string.Template(tmpl).safe_substitute(os.environ)
+              open('/out/analysis.xml', 'w').write(out)
+          env:
+            - name: AMQP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-credentials
+                  key: amqp-password
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: sdr-credentials
+                  key: db-password
+          volumeMounts:
+            - name: config-template
+              mountPath: /tmpl
+              readOnly: true
+            - name: config-rendered
+              mountPath: /out
+
       containers:
         - name: sdr-analysis
-          image: ghcr.io/BMichaud7/sdr-analysis:2.3.0  # ← update tag on each release
+          image: ghcr.io/bmichaud7/sdr-analysis:2.3.0
           imagePullPolicy: Always
 
           env:
@@ -140,21 +166,18 @@ spec:
               value: /etc/sdr-analysis/analysis.xml
             - name: SDR_LOG_LEVEL
               value: info
-            # Pod's own IP — written into AMQP ACCEPT response so
-            # SdrResourceManager knows where to send IQ UDP packets
             - name: POD_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
 
           ports:
-            # UDP IQ receive range (one port per active task)
             - containerPort: 20000
               protocol: UDP
               name: iq-udp
 
           volumeMounts:
-            - name: analysis-config-volume
+            - name: config-rendered
               mountPath: /etc/sdr-analysis
               readOnly: true
 
@@ -188,12 +211,11 @@ spec:
               drop: ["ALL"]
 
       volumes:
-        - name: analysis-config-volume
+        - name: config-template
           configMap:
             name: analysis-config
-            items:
-              - key: analysis.xml
-                path: analysis.xml
+        - name: config-rendered
+          emptyDir: {}
 
 ---
 # ── NetworkPolicy ──────────────────────────────────────────────────────
