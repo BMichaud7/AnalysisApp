@@ -6,6 +6,7 @@
 #include <proton/messaging_handler.hpp>
 #include <proton/connection.hpp>
 #include <proton/connection_options.hpp>
+#include <proton/reconnect_options.hpp>
 #include <proton/sender.hpp>
 #include <proton/sender_options.hpp>
 #include <proton/receiver.hpp>
@@ -15,6 +16,7 @@
 #include <proton/delivery.hpp>
 #include <proton/work_queue.hpp>
 #include <proton/transport.hpp>
+#include <proton/symbol.hpp>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -27,19 +29,180 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <thread>
-#include <stdexcept>
 
 namespace analysis {
 
 using json = nlohmann::json;
 using namespace std::chrono;
 
-// ── JSON encoding for task request ────────────────────────────────────────────
-// dest_ip + optional prebound_port: when prebound_port > 0 the socket is already
-// listening before the request is sent, so the controller streams to it immediately
-// without the data-loss race where streaming starts before bind() completes.
+// ── Persistent AMQP channel for task request/response ────────────────────────
+// Mirrors TaskAmqpChannel in AcquisitionApp: connects once at construction,
+// uses a dynamic (unique) receiver so no other subscriber steals responses,
+// and reuses the connection across all collect() calls — paying the ~30s
+// Artemis settlement cost once instead of on every analysis.
+
+class IqTaskChannel : public proton::messaging_handler {
+public:
+    IqTaskChannel(std::string url, std::string user, std::string pass,
+                  std::string req_queue)
+        : url_(std::move(url)), user_(std::move(user)), pass_(std::move(pass))
+        , req_queue_(std::move(req_queue))
+    {}
+
+    ~IqTaskChannel() { stop(); }
+
+    void start(int connect_timeout_ms = 60000) {
+        container_ = std::make_unique<proton::container>(*this);
+        thread_ = std::thread([this]{ container_->run(); });
+        std::unique_lock<std::mutex> lk(mu_);
+        ready_cv_.wait_for(lk, milliseconds(connect_timeout_ms),
+                           [this]{ return ready_; });
+        if (!ready_)
+            spdlog::warn("[IqTaskChannel] not ready after {}ms", connect_timeout_ms);
+    }
+
+    void stop() {
+        if (container_) {
+            if (wq_)
+                wq_->add([this]{ sender_.connection().close(); });
+            if (thread_.joinable()) thread_.join();
+            container_.reset();
+        }
+    }
+
+    // Send msg_body and block until the correlated response arrives.
+    // Returns {} if timed out. Only one exchange() at a time (enforced by
+    // collect_mu_ in IqCollector — do not call concurrently).
+    std::string exchange(const std::string& msg_body,
+                         const std::string& corr_id,
+                         int timeout_ms) {
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            if (!ready_cv_.wait_for(lk, milliseconds(timeout_ms),
+                                    [this]{ return ready_; })) {
+                spdlog::warn("[IqTaskChannel] not ready");
+                return {};
+            }
+            pending_corr_  = corr_id;
+            pending_body_.clear();
+            pending_done_  = false;
+        }
+        wq_->add([this, msg_body]() mutable {
+            proton::message msg;
+            msg.body(msg_body);
+            msg.content_type("application/json");
+            msg.reply_to(reply_addr_);
+            if (sender_ && sender_.credit() > 0)
+                sender_.send(msg);
+            else
+                spdlog::warn("[IqTaskChannel] no credit — task dropped");
+        });
+        std::unique_lock<std::mutex> lk(mu_);
+        result_cv_.wait_for(lk, milliseconds(timeout_ms),
+                            [this]{ return pending_done_; });
+        return pending_body_;
+    }
+
+    // Fire-and-forget (TASK_STOP).
+    void send(const std::string& msg_body) {
+        std::unique_lock<std::mutex> lk(mu_);
+        if (!ready_) return;
+        wq_->add([this, msg_body]() mutable {
+            proton::message msg;
+            msg.body(msg_body);
+            msg.content_type("application/json");
+            if (sender_ && sender_.credit() > 0)
+                sender_.send(msg);
+        });
+    }
+
+    // proton callbacks ─────────────────────────────────────────────────────────
+    void on_container_start(proton::container& c) override {
+        proton::connection_options opts;
+        if (!user_.empty()) {
+            opts.sasl_allowed_mechs("PLAIN");
+            opts.sasl_allow_insecure_mechs(true);
+            opts.user(user_).password(pass_);
+        } else {
+            opts.sasl_allowed_mechs("ANONYMOUS");
+        }
+        proton::reconnect_options ropts;
+        ropts.delay(proton::duration(2000));
+        ropts.max_delay(proton::duration(30000));
+        ropts.max_attempts(0);
+        opts.reconnect(ropts);
+        c.connect(url_, opts);
+    }
+
+    void on_connection_open(proton::connection& conn) override {
+        proton::sender_options sopts;
+        sopts.target(proton::target_options().capabilities({proton::symbol("queue")}));
+        sender_ = conn.open_sender(req_queue_, sopts);
+
+        proton::receiver_options ropts;
+        ropts.source(proton::source_options().dynamic(true));
+        conn.open_receiver("", ropts);
+    }
+
+    void on_receiver_open(proton::receiver& r) override {
+        reply_addr_ = r.source().address();
+        spdlog::info("[IqTaskChannel] connected, reply_to={}", reply_addr_);
+        wq_ = &r.work_queue();
+        std::lock_guard<std::mutex> lk(mu_);
+        ready_ = true;
+        ready_cv_.notify_all();
+    }
+
+    void on_message(proton::delivery& d, proton::message& msg) override {
+        d.accept();
+        try {
+            std::string b = proton::get<std::string>(msg.body());
+            auto j = json::parse(b);
+            std::lock_guard<std::mutex> lk(mu_);
+            if (!pending_corr_.empty() &&
+                (j.value("request_id", "") == pending_corr_ ||
+                 j.value("correlation_id", "") == pending_corr_)) {
+                pending_body_ = b;
+                pending_done_ = true;
+                pending_corr_.clear();
+                result_cv_.notify_all();
+            }
+        } catch (...) {}
+    }
+
+    void on_transport_error(proton::transport& t) override {
+        spdlog::warn("[IqTaskChannel] transport error: {}", t.error().what());
+        std::lock_guard<std::mutex> lk(mu_);
+        ready_ = false;
+        reply_addr_.clear();
+    }
+    void on_connection_error(proton::connection& c) override {
+        spdlog::warn("[IqTaskChannel] connection error: {}", c.error().what());
+    }
+
+private:
+    std::string url_, user_, pass_, req_queue_;
+
+    std::unique_ptr<proton::container> container_;
+    std::thread  thread_;
+
+    proton::sender      sender_;
+    proton::work_queue* wq_{nullptr};
+    std::string         reply_addr_;
+
+    std::mutex              mu_;
+    std::condition_variable ready_cv_;
+    std::condition_variable result_cv_;
+    bool        ready_{false};
+    std::string pending_corr_;
+    std::string pending_body_;
+    bool        pending_done_{false};
+};
+
+// ── JSON helpers ──────────────────────────────────────────────────────────────
 
 static std::string buildTaskRequestJson(const std::string& request_id,
                                          double center_freq_hz,
@@ -52,22 +215,18 @@ static std::string buildTaskRequestJson(const std::string& request_id,
 {
     auto ts = duration_cast<milliseconds>(
                   system_clock::now().time_since_epoch()).count();
-
     json streaming = {{"dest_ip", dest_ip}};
     if (prebound_port > 0)
         streaming["dest_ports"] = json::array({static_cast<int>(prebound_port)});
 
-    json j = {
+    return json{
         {"msg_type",        "TASK_REQUEST"},
         {"schema_version",  sdr::SCHEMA_VERSION},
         {"request_id",      request_id},
         {"timestamp_ms",    ts},
         {"task_type",       "NARROWBAND"},
         {"rank",            rank},
-        {"schedule", {
-            {"mode",         "IMMEDIATE"},
-            {"duration_ms",  duration_ms}
-        }},
+        {"schedule", {{"mode", "IMMEDIATE"}, {"duration_ms", duration_ms}}},
         {"rf", {
             {"center_freq_hz",  center_freq_hz},
             {"bandwidth_hz",    bandwidth_hz},
@@ -75,121 +234,21 @@ static std::string buildTaskRequestJson(const std::string& request_id,
             {"rx_count",        1}
         }},
         {"streaming", streaming}
-    };
-    return j.dump();
+    }.dump();
 }
 
 static std::string buildTaskStopJson(const std::string& request_id,
                                       const std::string& task_id)
 {
-    auto ts = duration_cast<milliseconds>(
-                  system_clock::now().time_since_epoch()).count();
-    json j = {
-        {"msg_type",    "TASK_STOP"},
-        {"request_id",  request_id},
-        {"task_id",     task_id},
-        {"timestamp_ms", ts},
-        {"reason",      "collection complete"}
-    };
-    return j.dump();
+    return json{
+        {"msg_type",     "TASK_STOP"},
+        {"request_id",   request_id},
+        {"task_id",      task_id},
+        {"timestamp_ms", duration_cast<milliseconds>(
+                             system_clock::now().time_since_epoch()).count()},
+        {"reason",       "collection complete"}
+    }.dump();
 }
-
-// ── Proton one-shot request/response handler ──────────────────────────────────
-
-class RpcHandler : public proton::messaging_handler {
-public:
-    struct BrokerCfg {
-        std::string url, username, password;
-        std::string request_queue, response_queue;
-    };
-
-    RpcHandler(BrokerCfg cfg, std::string request_body,
-               std::string request_id,
-               std::function<void(const std::string&)> on_response,
-               std::function<void(const std::string&)> on_error)
-        : cfg_(std::move(cfg))
-        , request_body_(std::move(request_body))
-        , request_id_(std::move(request_id))
-        , on_response_(std::move(on_response))
-        , on_error_(std::move(on_error))
-    {}
-
-    void on_container_start(proton::container& c) override {
-        proton::connection_options opts;
-        if (!cfg_.username.empty()) {
-            opts.sasl_allowed_mechs("PLAIN");
-            opts.sasl_allow_insecure_mechs(true);
-            opts.user(cfg_.username).password(cfg_.password);
-        } else {
-            opts.sasl_allowed_mechs("ANONYMOUS");
-        }
-        c.connect(cfg_.url, opts);
-    }
-
-    void on_connection_open(proton::connection& c) override {
-        // Use ANYCAST capabilities so Artemis creates proper queue addresses
-        // (MULTICAST default stalls credit propagation by ~15s per connection).
-        proton::sender_options sopts;
-        sopts.target(proton::target_options().capabilities(
-            {proton::symbol("queue")}));
-        sender_ = c.open_sender(cfg_.request_queue, sopts);
-        if (!cfg_.response_queue.empty()) {
-            proton::receiver_options ropts;
-            ropts.source(proton::source_options().capabilities(
-                {proton::symbol("queue")}));
-            receiver_ = c.open_receiver(cfg_.response_queue, ropts);
-        }
-    }
-
-    void on_sender_open(proton::sender& s) override {
-        proton::message msg;
-        msg.body(request_body_);
-        msg.content_type("application/json");
-        msg.durable(false);
-        // Set reply_to so the controller routes the response to our dedicated
-        // queue instead of the shared default — prevents cross-app message theft.
-        if (!cfg_.response_queue.empty())
-            msg.reply_to(cfg_.response_queue);
-        s.send(msg);
-        spdlog::debug("IqCollector: sent request ({} bytes)", request_body_.size());
-        // Fire-and-forget (e.g. TASK_STOP): close after sending, no reply needed
-        if (cfg_.response_queue.empty())
-            s.connection().close();
-    }
-
-    void on_message(proton::delivery& d, proton::message& m) override {
-        d.accept();
-        try {
-            std::string body = proton::get<std::string>(m.body());
-            // Match by request_id — discard stale responses from other apps
-            // that share the same sdr.task.response queue (e.g. AcquisitionApp)
-            auto j = json::parse(body);
-            if (!request_id_.empty() &&
-                j.value("request_id", "") != request_id_) {
-                spdlog::debug("IqCollector: discarding stale response for req={}",
-                              j.value("request_id", "?"));
-                return;  // stay connected, wait for our response
-            }
-            on_response_(body);
-        } catch (const std::exception& ex) {
-            on_error_(std::string("on_message parse error: ") + ex.what());
-        }
-        sender_.connection().close();
-    }
-
-    void on_transport_error(proton::transport& t) override { on_error_(t.error().what()); }
-    void on_connection_error(proton::connection& c) override { on_error_(c.error().what()); }
-    void on_error(const proton::error_condition& e) override { on_error_(e.what()); }
-
-private:
-    BrokerCfg    cfg_;
-    std::string  request_body_;
-    std::string  request_id_;
-    proton::sender   sender_;
-    proton::receiver receiver_;
-    std::function<void(const std::string&)> on_response_;
-    std::function<void(const std::string&)> on_error_;
-};
 
 // ── UDP helpers ───────────────────────────────────────────────────────────────
 
@@ -197,17 +256,14 @@ static int openBoundUdpSocket(int port)
 {
     int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return -1;
-
     int rcvbuf = 16 * 1024 * 1024;
     ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
-
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
     addr.sin_port        = htons(static_cast<uint16_t>(port));
     addr.sin_addr.s_addr = INADDR_ANY;
     if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        ::close(fd);
-        return -1;
+        ::close(fd); return -1;
     }
     return fd;
 }
@@ -216,7 +272,6 @@ static std::vector<float> receiveIq(int udp_fd, int target_samples, int timeout_
 {
     std::vector<float> iq;
     iq.reserve(static_cast<size_t>(target_samples) * 2);
-
     auto deadline = steady_clock::now() + milliseconds(timeout_ms);
     constexpr int BUF = 65536;
     std::vector<uint8_t> buf(BUF);
@@ -229,40 +284,26 @@ static std::vector<float> receiveIq(int udp_fd, int target_samples, int timeout_
             break;
         }
         long remaining_ms = duration_cast<milliseconds>(deadline - now).count();
-
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(udp_fd, &fds);
-        timeval tv;
-        tv.tv_sec  = remaining_ms / 1000;
-        tv.tv_usec = (remaining_ms % 1000) * 1000;
-
-        int ret = ::select(udp_fd + 1, &fds, nullptr, nullptr, &tv);
-        if (ret <= 0) break;
+        fd_set fds; FD_ZERO(&fds); FD_SET(udp_fd, &fds);
+        timeval tv{remaining_ms / 1000, (remaining_ms % 1000) * 1000};
+        if (::select(udp_fd + 1, &fds, nullptr, nullptr, &tv) <= 0) break;
 
         ssize_t n = ::recv(udp_fd, buf.data(), BUF, 0);
         if (n < static_cast<ssize_t>(sdr::IQ_PACKET_HEADER_SIZE)) continue;
-
         const auto* hdr = reinterpret_cast<const sdr::IqPacketHeader*>(buf.data());
-        if (hdr->magic != sdr::IQ_PACKET_MAGIC) {
-            spdlog::debug("IqCollector: bad magic in UDP packet");
-            continue;
-        }
+        if (hdr->magic != sdr::IQ_PACKET_MAGIC) continue;
 
-        int n_samp = hdr->num_samples;
-        int payload_bytes = static_cast<int>(n) - sdr::IQ_PACKET_HEADER_SIZE;
-        int max_samp = payload_bytes / static_cast<int>(sizeof(float)) / 2;
-        n_samp = std::min(n_samp, max_samp);
-
+        int n_samp = std::min(hdr->num_samples,
+                              (uint16_t)((static_cast<int>(n) - sdr::IQ_PACKET_HEADER_SIZE)
+                                         / (int)sizeof(float) / 2));
         const float* samples = reinterpret_cast<const float*>(
                                    buf.data() + sdr::IQ_PACKET_HEADER_SIZE);
         iq.insert(iq.end(), samples, samples + n_samp * 2);
     }
-
     return iq;
 }
 
-// ── IqCollector implementation ────────────────────────────────────────────────
+// ── IqCollector ───────────────────────────────────────────────────────────────
 
 IqCollector::IqCollector(const AmqpConfig& amqp_cfg,
                           const CollectorConfig& col_cfg,
@@ -272,113 +313,83 @@ IqCollector::IqCollector(const AmqpConfig& amqp_cfg,
     , col_cfg_(col_cfg)
     , local_ip_(local_ip)
     , task_rank_(task_rank)
-{}
+{
+    ch_ = std::make_unique<IqTaskChannel>(
+        amqp_cfg_.url, amqp_cfg_.username, amqp_cfg_.password,
+        amqp_cfg_.task_request_queue);
+    ch_->start(60000);
+}
 
 IqCollector::~IqCollector() = default;
-bool IqCollector::connect()    { return true; }
-void IqCollector::disconnect() {}
 
 std::vector<float> IqCollector::collect(double center_freq_hz,
                                          double bandwidth_hz,
                                          const std::string& request_id)
 {
-    double bw     = std::max(bandwidth_hz, 25000.0);
-    double sr     = col_cfg_.analysis_sample_rate_sps;
-    int64_t dur_ms = static_cast<int64_t>(
-                         (double)col_cfg_.collect_samples / sr * 1000.0) + 500;
+    // Serialize: only one NARROWBAND task at a time (SDR is an exclusive resource).
+    std::lock_guard<std::mutex> collect_guard(collect_mu_);
 
-    // Pre-bind the UDP socket BEFORE submitting the task so the controller can
-    // stream to a ready socket from the very first packet — same fix applied to
-    // TaskManagerIqSource to eliminate the AMQP-latency data-loss race.
-    int prebound_fd   = openBoundUdpSocket(0);  // port 0 → OS assigns ephemeral
+    double  bw     = std::max(bandwidth_hz, 25000.0);
+    double  sr     = col_cfg_.analysis_sample_rate_sps;
+    int64_t dur_ms = static_cast<int64_t>((double)col_cfg_.collect_samples / sr * 1000.0) + 500;
+
+    // Pre-bind UDP socket before submitting the task — controller streams
+    // to the ready socket immediately without the 30s AMQP-latency data-loss race.
+    int      prebound_fd   = openBoundUdpSocket(0);
     uint16_t prebound_port = 0;
     if (prebound_fd >= 0) {
-        struct sockaddr_in sa{};
-        socklen_t sl = sizeof(sa);
+        struct sockaddr_in sa{}; socklen_t sl = sizeof(sa);
         if (getsockname(prebound_fd, reinterpret_cast<sockaddr*>(&sa), &sl) == 0)
             prebound_port = ntohs(sa.sin_port);
-        spdlog::debug("IqCollector: pre-bound UDP port {}", prebound_port);
     }
 
-    // Step 1: submit task — include pre-bound port so controller honours it
+    auto closePreboundFd = [&]{
+        if (prebound_fd >= 0) { ::close(prebound_fd); prebound_fd = -1; }
+    };
+
+    // Step 1: submit NARROWBAND task via persistent channel.
     std::string req_json = buildTaskRequestJson(
-        request_id, center_freq_hz, bw, sr, dur_ms, local_ip_, task_rank_,
-        prebound_port);
+        request_id, center_freq_hz, bw, sr, dur_ms,
+        local_ip_, task_rank_, prebound_port);
 
-    RpcHandler::BrokerCfg bcfg{
-        amqp_cfg_.url, amqp_cfg_.username, amqp_cfg_.password,
-        amqp_cfg_.task_request_queue, amqp_cfg_.task_response_queue
-    };
+    spdlog::info("IqCollector: submitting NARROWBAND {:.3f} MHz req={}",
+                 center_freq_hz / 1e6, request_id);
 
-    std::mutex mu;
-    std::condition_variable cv;
-    std::string response_body, error_body;
-    bool done = false;
-
-    auto on_resp = [&](const std::string& body) {
-        std::lock_guard<std::mutex> lk(mu);
-        response_body = body; done = true; cv.notify_all();
-    };
-    auto on_err = [&](const std::string& err) {
-        std::lock_guard<std::mutex> lk(mu);
-        error_body = err; done = true; cv.notify_all();
-    };
-
-    RpcHandler handler(bcfg, req_json, request_id, on_resp, on_err);
-    proton::container container(handler);
-    std::thread amqp_thread([&]{ container.run(); });
-
-    bool timed_out = false;
-    {
-        std::unique_lock<std::mutex> lk(mu);
-        cv.wait_for(lk, milliseconds(col_cfg_.analysis_timeout_ms),
-                    [&]{ return done; });
-        timed_out = !done;
-    }
-    // Only stop the container on timeout — on success the connection closes
-    // itself gracefully in on_message(); an unconditional stop() races with
-    // that close and triggers a spurious connection-aborted error.
-    if (timed_out) container.stop();
-    if (amqp_thread.joinable()) amqp_thread.join();
-
-    auto closePreboundFd = [&]{ if (prebound_fd >= 0) { ::close(prebound_fd); prebound_fd = -1; } };
-
-    if (!error_body.empty()) {
-        spdlog::error("IqCollector: AMQP error: {}", error_body);
+    std::string resp_body = ch_->exchange(req_json, request_id,
+                                           col_cfg_.analysis_timeout_ms);
+    if (resp_body.empty()) {
+        spdlog::error("IqCollector: no response for req={}", request_id);
         closePreboundFd();
         return {};
     }
 
-    // Step 2: parse TASK_RESPONSE, get controller-allocated UDP port
+    // Step 2: parse TASK_ACCEPTED.
     std::string accepted_task_id;
     int udp_port = 0;
     try {
-        auto j = json::parse(response_body);
-        bool accepted = (j.value("status", "") == "ACCEPTED");
-        if (!accepted) {
+        auto j = json::parse(resp_body);
+        if (j.value("status", "") != "ACCEPTED") {
             spdlog::warn("IqCollector: task rejected: {}",
                          j.value("reject_reason", "unknown"));
             closePreboundFd();
             return {};
         }
         accepted_task_id = j.value("task_id", "");
-
-        if (j.contains("streams") && j["streams"].is_array() && !j["streams"].empty()) {
+        if (j.contains("streams") && !j["streams"].empty()) {
             udp_port = j["streams"][0].value("udp_port", 0);
             last_sr_ = j["streams"][0].value("sample_rate_sps", sr);
         } else {
             last_sr_ = sr;
         }
-
         if (udp_port == 0) {
-            spdlog::error("IqCollector: ACCEPTED response missing streams[0].udp_port");
+            spdlog::error("IqCollector: ACCEPTED missing streams[0].udp_port");
             closePreboundFd();
             return {};
         }
-        spdlog::debug("IqCollector: task accepted id='{}' udp_port={} sr={:.0f} Hz",
+        spdlog::debug("IqCollector: accepted task_id={} port={} sr={:.0f}",
                       accepted_task_id, udp_port, last_sr_);
     } catch (const std::exception& ex) {
-        spdlog::error("IqCollector: failed to parse TASK_RESPONSE: {}", ex.what());
+        spdlog::error("IqCollector: parse error: {}", ex.what());
         closePreboundFd();
         return {};
     }
@@ -386,43 +397,27 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
     // Step 3: use pre-bound socket if controller honoured our port, else re-bind.
     int udp_fd;
     if (prebound_fd >= 0 && prebound_port > 0 && udp_port == prebound_port) {
-        udp_fd = prebound_fd;
-        prebound_fd = -1;  // ownership transferred
-        spdlog::debug("IqCollector: controller honoured pre-bound port {}", udp_port);
+        udp_fd = prebound_fd; prebound_fd = -1;
     } else {
-        if (prebound_fd >= 0) { ::close(prebound_fd); prebound_fd = -1; }
+        closePreboundFd();
         udp_fd = openBoundUdpSocket(udp_port);
         if (udp_fd < 0) {
-            spdlog::error("IqCollector: failed to bind UDP socket on port {}: {}",
+            spdlog::error("IqCollector: bind port {} failed: {}",
                           udp_port, strerror(errno));
             return {};
         }
-        spdlog::info("IqCollector: re-bound UDP to controller-assigned port {}", udp_port);
     }
 
-    // Step 4: receive IQ
+    // Step 4: receive IQ.
     auto iq = receiveIq(udp_fd, col_cfg_.collect_samples,
                          col_cfg_.analysis_timeout_ms);
     ::close(udp_fd);
-
     spdlog::info("IqCollector: collected {} samples (sr={:.0f} Hz)",
-                 static_cast<int>(iq.size()) / 2, last_sr_);
+                 (int)iq.size() / 2, last_sr_);
 
-    // Step 5: fire-and-forget TASK_STOP (no response expected)
-    if (!accepted_task_id.empty()) {
-        std::string stop_json = buildTaskStopJson(request_id + "_stop",
-                                                   accepted_task_id);
-        auto noop = [](const std::string&){};
-        // Empty response_queue → fire-and-forget; on_sender_open closes immediately
-        RpcHandler::BrokerCfg stop_bcfg{
-            amqp_cfg_.url, amqp_cfg_.username, amqp_cfg_.password,
-            amqp_cfg_.task_request_queue, ""
-        };
-        RpcHandler stop_handler(stop_bcfg, stop_json, "", noop, noop);
-        proton::container stop_c(stop_handler);
-        std::thread stop_th([&]{ stop_c.run(); });
-        if (stop_th.joinable()) stop_th.join();
-    }
+    // Step 5: fire-and-forget TASK_STOP.
+    if (!accepted_task_id.empty())
+        ch_->send(buildTaskStopJson(request_id + "_stop", accepted_task_id));
 
     return iq;
 }
