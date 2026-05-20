@@ -5,23 +5,25 @@ Subscribes to IQ streams from **SdrResourceManager**, performs five-layer automa
 ## Architecture
 
 ```
-AcquisitionApp ──RF_DETECTION (+ IQ snapshot)──► rf.detections
-                                                       │
-                        ┌──────────────────────────────┘
+AcquisitionApp ──RF_DETECTION (+ IQ snapshot b64)──► rf.detections
+                                                            │
+                        ┌───────────────────────────────────┘
                         │
-              ┌─────────▼──────────────────────────────────────┐
-              │  AnalysisService — per-detection dispatch       │
-              │                                                  │
-              │  ① Fast path  (IQ snapshot present, ~5 ms)     │
-              │    ONNX classifier on embedded 1 024-sample IQ  │
-              │    → publish immediately if confidence ≥ 75%    │
-              │                                                  │
-              │  ② Slow path  (low ONNX confidence, ~265 ms)   │
-              │    Request NARROWBAND task from SdrResourceMgr   │
-              │    → collect 65 536 samples at 2 MSPS           │
-              │    → FeatureExtractor + ONNX (parallel)         │
-              │    → publish result                              │
-              └────────────────────────────────────────────────-┘
+              ┌─────────▼──────────────────────────────────────────────┐
+              │  AnalysisService — 2 parallel worker threads            │
+              │                                                          │
+              │  ① Fast path  (ONNX loaded + snapshot present, ~5 ms)  │
+              │    ONNX on embedded 1 024-sample IQ snapshot             │
+              │    → publish immediately if confidence ≥ 75%             │
+              │                                                          │
+              │  ② Slow path  (~80 ms, persistent IqTaskChannel)        │
+              │    IqTaskChannel.exchange() → NARROWBAND task            │
+              │    (persistent AMQP conn — no per-call reconnect cost)   │
+              │    → collect 65 536 samples at 2 MSPS (~32 ms)          │
+              │    → FeatureExtractor + ONNX (parallel)                  │
+              │    → persist to PostgreSQL analysis_results              │
+              │    → publish result                                       │
+              └────────────────────────────────────────────────────────-┘
                         │
                AMQP ──► rf.analysis topic
 ```
@@ -122,14 +124,14 @@ SNR sensitivity (RTL-SDR impairments + AWGN, 3 realisations × 7 signals):
 rule-based path — this is the gap the ONNX fallback is designed to fill.
 FM/AM/OFDM/FSK/CSS are 100% across all profiles including OTA.
 
-Latency (C++ engine):
+Latency (C++ engine, 2 worker threads):
 
 | Path | Trigger | Total latency |
 |------|---------|---------------|
 | Fast (ONNX from snapshot, confidence ≥ 75%) | ~65% of signals | **~5 ms** |
-| Slow (full collection + features) | ~35% of signals | **~265 ms** |
+| Slow (full collection + features) | ~35% of signals | **~80 ms** |
 
-The fast path fires before any SDR re-acquisition — ONNX runs on the 1 024-sample IQ snapshot embedded in the `RF_DETECTION` AMQP message. The slow path collects 65 536 fresh samples at 2 MSPS and runs the full feature extraction + ONNX pipeline in parallel.
+The fast path fires before any SDR re-acquisition — ONNX runs on the 1 024-sample IQ snapshot embedded in the `RF_DETECTION` AMQP message. The slow path uses a persistent `IqTaskChannel` (connects once, reused across all collections) to submit a NARROWBAND task in ~16 ms, then collects 65 536 samples at 2 MSPS (~32 ms) and runs feature extraction + ONNX in parallel. Two workers run slow-path collections concurrently, doubling throughput within the 3 s analysis window.
 
 ---
 
@@ -298,33 +300,39 @@ journalctl -u sdr-analysis -f
 
 ## k3s / Kubernetes
 
-### Prerequisites
-
-- k3s cluster with `sdr-system` namespace (created by SdrResourceManager manifests)
-- Container image pushed to registry
-- ActiveMQ broker running (`activemq-service.sdr-system` in-cluster)
-
-### Deploy
+### Deploy (full stack)
 
 ```bash
-# 1. Update the image tag in deploy/k8s/deployment.yaml
-#    image: ghcr.io/BMichaud7/sdr-analysis:2.3.0
+cd ../SdrResourceManager
+./k8s/deploy.sh            # prompts for passwords interactively
+./k8s/deploy.sh --dry-run  # preview
 
-# 2. Set AMQP credentials
-kubectl create secret generic analysis-amqp-credentials \
-  -n sdr-system \
-  --from-literal=username=sdr_ctrl \
-  --from-literal=password=YOUR_PASSWORD
+# Or non-interactive:
+AMQP_PASSWORD=s3cr3t DB_PASSWORD=s3cr3t ./k8s/deploy.sh
+```
 
-# 3. Apply manifests
+The script creates the `sdr-credentials` Secret, then applies Namespace →
+PostgreSQL → Artemis + controller → AcquisitionApp → AnalysisApp → signal-logger.
+
+### Apply just this manifest
+
+Requires `sdr-credentials` Secret to exist first
+(see `SdrResourceManager/k8s/secrets.yaml`):
+
+```bash
 kubectl apply -f deploy/k8s/deployment.yaml
-
-# 4. Verify
 kubectl get pods -n sdr-system -l app=sdr-analysis
 kubectl logs -n sdr-system -l app=sdr-analysis -f
 ```
 
-### Update config
+### How credentials work
+
+An initContainer renders `analysis.xml` from the ConfigMap template, substituting
+`${AMQP_PASSWORD}` and `${DB_PASSWORD}` from the `sdr-credentials` Secret into an
+emptyDir volume. The main container reads from the emptyDir — the ConfigMap never
+contains real passwords.
+
+### Update config only
 
 ```bash
 kubectl create configmap analysis-config -n sdr-system \
@@ -341,7 +349,8 @@ AnalysisApp is stateless — scale replicas freely:
 kubectl scale deployment sdr-analysis -n sdr-system --replicas=4
 ```
 
-Each pod announces its own `POD_IP` to SdrResourceManager; tasks are distributed across pods via AMQP.
+Each pod announces its own `POD_IP`; tasks are distributed across pods via AMQP.
+Each pod runs 2 internal worker threads, so 4 replicas = 8 concurrent slow-path collections.
 
 ---
 
