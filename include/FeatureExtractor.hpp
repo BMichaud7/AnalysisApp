@@ -1,24 +1,50 @@
 #pragma once
+/**
+ * @file FeatureExtractor.hpp
+ * @brief Extracts a SignalFeatures vector from a block of IQ samples.
+ *
+ * Feature extraction covers:
+ * - PSD computation (Welch), spectral flatness, symmetry
+ * - Envelope statistics and instantaneous frequency/phase
+ * - Higher-order cumulants (C40, C42, C41) for modulation discrimination
+ * - Symbol rate estimation via cyclostationary analysis
+ * - Structural detection: OFDM (CP autocorrelation), FHSS (spectrogram),
+ *   DSSS (chip-rate peak), chirp (Wigner-Ville), burst (envelope gating)
+ *
+ * One FeatureExtractor per analysis pipeline (owns FFTW plans).
+ * Thread-safe: extract() is const; FFTW plans are read-only after construction.
+ */
 #include "SignalFeatures.hpp"
 #include <vector>
 #include <complex>
 
 namespace analysis {
 
+/// @brief Extracts a SignalFeatures vector from raw IQ samples.
 class FeatureExtractor {
 public:
+    /**
+     * @brief Construct the extractor and allocate FFTW plans.
+     * @param fft_size FFT size for PSD and cyclostationary analysis.
+     */
     explicit FeatureExtractor(int fft_size = 4096);
     ~FeatureExtractor();
 
-    // Main entry: CF32 interleaved I/Q samples → feature vector
+    /**
+     * @brief Extract all features from a block of IQ samples.
+     * @param iq              Interleaved float32 samples (I,Q,I,Q,…).
+     * @param sample_rate_sps Sample rate (samples/s).
+     * @param center_freq_hz  Centre frequency (Hz); stored verbatim in the result.
+     * @return Fully populated SignalFeatures.
+     */
     SignalFeatures extract(const std::vector<float>& iq,
                            double sample_rate_sps,
                            double center_freq_hz) const;
 
 private:
     int fft_size_;
-    void* fft_plan_  = nullptr;  // FFTW plan
-    void* fft_plan2_ = nullptr;  // second plan for cyclostationary
+    void* fft_plan_  = nullptr;  ///< FFTW plan for PSD.
+    void* fft_plan2_ = nullptr;  ///< FFTW plan for cyclostationary analysis.
 
     void computePsd(const std::vector<std::complex<float>>& x,
                     std::vector<float>& psd_out) const;

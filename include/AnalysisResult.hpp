@@ -1,63 +1,91 @@
 #pragma once
+/**
+ * @file AnalysisResult.hpp
+ * @brief Full signal characterisation result from the analysis pipeline.
+ *
+ * AnalysisResult captures five layers of signal description:
+ * - **Layer 1** — analog modulation type and index
+ * - **Layer 2** — digital carrier modulation and symbol rate
+ * - **Layer 3** — channel structure (burst, TDMA, FHSS, OFDM)
+ * - **Layer 4** — bitstream traits (bit rate, line code, FEC)
+ * - **Layer 5** — protocol hypotheses matched against the signature database
+ */
 #include <string>
 #include <vector>
 #include <cstdint>
 
 namespace analysis {
 
+/**
+ * @brief One protocol identification hypothesis (top-3 returned per signal).
+ */
 struct Hypothesis {
-    std::string system;      // e.g. "GSM", "AIS", "FM Broadcast"
-    std::string category;    // e.g. "Cellular", "Marine", "Broadcast"
-    float       confidence;  // 0.0–1.0
-    std::string reasoning;   // human-readable explanation
+    std::string system;      ///< Protocol / system name (e.g. "GSM", "AIS", "FM Broadcast").
+    std::string category;    ///< Broad category (e.g. "Cellular", "Marine", "Broadcast").
+    float       confidence;  ///< Match score normalised to [0, 1].
+    std::string reasoning;   ///< Human-readable explanation of why this hypothesis scored.
 };
 
+/**
+ * @brief Complete characterisation of one detected signal.
+ *
+ * Produced by AnalysisEngine::analyze() or AnalysisEngine::analyzeSnapshot()
+ * and serialised to JSON for publication on the @c rf.analysis AMQP topic.
+ *
+ * The @p fast_path flag indicates whether classification came from the
+ * embedded IQ snapshot (~5 ms, ONNX only) or the full slow path
+ * (IQ re-acquisition + feature extraction, ~80–165 ms).
+ */
 struct AnalysisResult {
-    std::string detection_id;   // UUID
-    std::string scanner_id;
-    double      center_freq_hz;
-    double      bandwidth_hz;
-    double      snr_db;
-    int64_t     timestamp_ms;
+    std::string detection_id;   ///< UUID matching the originating RF_DETECTION message.
+    std::string scanner_id;     ///< Scanner that produced the detection.
+    double      center_freq_hz; ///< Centre frequency (Hz).
+    double      bandwidth_hz;   ///< Occupied bandwidth (Hz).
+    double      snr_db;         ///< Signal-to-noise ratio (dB).
+    int64_t     timestamp_ms;   ///< UTC epoch milliseconds of original detection.
 
-    // Layer 1: Analog modulation
-    std::string analog_modulation;  // "AM_DSB_LC","AM_DSB_SC","SSB_USB","SSB_LSB","CW","FM_NB","FM_WB","PM","ANALOG_TV" or ""
-    double      analog_index;       // AM modulation index or FM deviation Hz
+    // ── Layer 1: Analog modulation ──────────────────────────────────────────
+    /// Analog modulation type: "AM_DSB_LC", "AM_DSB_SC", "SSB_USB", "SSB_LSB",
+    /// "CW", "FM_NB", "FM_WB", "PM", "ANALOG_TV", or "" (not analog).
+    std::string analog_modulation;
+    double      analog_index;   ///< AM modulation index or FM deviation (Hz).
 
-    // Layer 2: Digital carrier
-    std::string digital_modulation; // "BPSK","QPSK","8PSK","QAM16",... or ""
-    double      symbol_rate_sps;
-    int         m_ary;
-    bool        is_ofdm;
-    bool        is_spread;          // DSSS or FHSS
+    // ── Layer 2: Digital carrier ────────────────────────────────────────────
+    /// Digital modulation: "BPSK", "QPSK", "8PSK", "QAM16", "QAM64", … or "".
+    std::string digital_modulation;
+    double      symbol_rate_sps; ///< Estimated symbol rate (symbols/s).
+    int         m_ary;           ///< Modulation order (e.g. 2 for BPSK, 4 for QPSK).
+    bool        is_ofdm;         ///< True if OFDM subcarrier structure detected.
+    bool        is_spread;       ///< True if DSSS or FHSS spreading detected.
 
-    // Layer 3: Channel structure
-    bool        is_burst;
-    double      burst_duty_cycle;
-    bool        is_tdma;
-    bool        is_fhss;
-    bool        is_dsss;
-    double      ofdm_subcarrier_spacing_hz;
+    // ── Layer 3: Channel structure ──────────────────────────────────────────
+    bool        is_burst;                    ///< True if burst (non-continuous) transmission.
+    double      burst_duty_cycle;            ///< Fraction of time the carrier is on (0–1).
+    bool        is_tdma;                     ///< True if time-division multiple access detected.
+    bool        is_fhss;                     ///< True if frequency-hopping spread spectrum.
+    bool        is_dsss;                     ///< True if direct-sequence spread spectrum.
+    double      ofdm_subcarrier_spacing_hz;  ///< OFDM subcarrier spacing (Hz; 0 if not OFDM).
 
-    // Layer 4: Bitstream traits
-    double      bit_rate_bps;
-    std::string line_code;       // "NRZ","NRZI","Manchester",""
-    bool        fec_detected;
-    bool        has_sync_pattern;
+    // ── Layer 4: Bitstream traits ───────────────────────────────────────────
+    double      bit_rate_bps;    ///< Estimated bit rate (bits/s).
+    std::string line_code;       ///< Line coding: "NRZ", "NRZI", "Manchester", or "".
+    bool        fec_detected;    ///< True if forward error correction markers found.
+    bool        has_sync_pattern; ///< True if a recognisable preamble/sync word detected.
 
-    // Layer 5: Protocol hypotheses (top 3, descending confidence)
+    // ── Layer 5: Protocol hypotheses ───────────────────────────────────────
+    /// Top protocol matches (up to 3), sorted by confidence descending.
     std::vector<Hypothesis> hypotheses;
 
-    bool  classified;  // false if SNR too low or features inconclusive
-    std::string reject_reason;
+    bool        classified;      ///< False if SNR too low or features inconclusive.
+    std::string reject_reason;   ///< Non-empty when classified == false.
 
-    // Path metadata
-    float rule_confidence = 0.f;  // 0–1: certainty of rule-based result
-                                  // (1.0 = structural detection, 0.0 = UNKNOWN)
-    bool  onnx_used = false;      // true if ONNX classifier overrode or augmented
-    float onnx_confidence = 0.f;  // softmax probability from ONNX (if used)
-    bool  fast_path = false;      // true = classified from embedded IQ snapshot (~5ms)
-                                  // false = full IQ collection + feature extraction (~165ms)
+    // ── Path metadata ───────────────────────────────────────────────────────
+    float rule_confidence = 0.f;  ///< Certainty of the rule-based result (0–1; 1 = structural detection).
+    bool  onnx_used       = false; ///< True if ONNX classifier overrode or augmented the result.
+    float onnx_confidence = 0.f;  ///< Softmax probability of the top ONNX class (if used).
+    /// True = classified from the embedded IQ snapshot (~5 ms, no SDR re-acquisition).
+    /// False = full IQ collection + feature extraction (~80–165 ms).
+    bool  fast_path       = false;
 };
 
 } // namespace analysis

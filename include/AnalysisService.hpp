@@ -1,4 +1,29 @@
 #pragma once
+/**
+ * @file AnalysisService.hpp
+ * @brief Top-level service: AMQP subscriber + dual worker threads + DB persistence.
+ *
+ * AnalysisService ties together the AMQP subscription loop and the analysis
+ * worker threads:
+ *
+ * - **subscriptionLoop** — AMQP thread subscribes to rf.detections, decodes
+ *   RF_DETECTION messages (including base64 IQ snapshots), and enqueues
+ *   detections for the workers.
+ *
+ * - **workerLoop (×NUM_WORKERS)** — dequeues detections, runs processDetection()
+ *   (fast path if snapshot available, slow path otherwise), publishes results
+ *   to rf.analysis, and persists to PostgreSQL.
+ *
+ * - **Frequency dedup** — a cooldown map prevents re-analysing the same
+ *   frequency more than once per REANALYSIS_COOLDOWN_MS (5 minutes).
+ *
+ * - **Queue depth limit** — MAX_QUEUE_DEPTH caps the backlog so IQ collection
+ *   windows are not missed while older items drain.
+ *
+ * @note The single SDR device is an exclusive resource.  Two workers can
+ *       collect IQ concurrently if the fast path (ONNX on snapshot) is
+ *       available; otherwise IqCollector serialises them.
+ */
 #include "Config.hpp"
 #include "AnalysisEngine.hpp"
 #include "IqCollector.hpp"
@@ -15,14 +40,19 @@
 #include <pqxx/pqxx>
 #endif
 
-// Forward declarations
 namespace proton { class container; }
 
 namespace analysis {
 
-// Forward declare the AMQP handler (defined in .cpp)
-class ServiceAmqpHandler;
+class ServiceAmqpHandler;  ///< Internal AMQP handler (defined in .cpp).
 
+/**
+ * @brief Inbound detection from the AMQP rf.detections topic.
+ *
+ * Populated by the subscription loop from the RF_DETECTION JSON message.
+ * @p iq_snapshot is non-empty when AcquisitionApp embedded a snapshot in the
+ * message (schema 1.2 @c iq_snapshot_b64 field) — enables the ONNX fast path.
+ */
 struct Detection {
     std::string scanner_id;
     double      center_freq_hz;
@@ -30,20 +60,31 @@ struct Detection {
     double      power_db;
     int64_t     timestamp_ms;
 
-    // 1 024-sample IQ snapshot from the acquiring dwell (interleaved float32 I,Q).
-    // Non-empty when AcquisitionApp embeds it in the RF_DETECTION message.
-    // Used by the ONNX fast path to classify without re-acquiring the SDR.
+    /// 1 024-sample CF32 IQ snapshot decoded from @c iq_snapshot_b64 (if present).
+    /// Empty when not provided; used by AnalysisEngine::analyzeSnapshot().
     std::vector<float> iq_snapshot;
     double             snapshot_sample_rate_sps{0.0};
 };
 
+/**
+ * @brief Orchestrates the full analysis pipeline as a long-running service.
+ *
+ * Call start() once; call stop() to drain the queue and shut down cleanly.
+ */
 class AnalysisService {
 public:
+    /**
+     * @brief Construct the service.
+     * @param cfg Application configuration (AMQP, collector, engine, DB).
+     */
     explicit AnalysisService(const AppConfig& cfg);
     ~AnalysisService();
 
+    /// @brief Connect to AMQP and launch the subscription + worker threads.
     void start();
+    /// @brief Drain the work queue, stop workers, and disconnect.
     void stop();
+    /// @brief True after start() returns and before stop() is called.
     bool isRunning() const { return running_.load(); }
 
 private:
@@ -52,15 +93,14 @@ private:
     IqCollector     collector_;
     std::atomic<bool> running_{false};
 
-    // AMQP handler (shared between subscriptionLoop and publishResult)
     std::shared_ptr<ServiceAmqpHandler>      amqp_handler_;
     std::shared_ptr<proton::container>       amqp_container_;
 
-    // Subscription thread
     std::thread sub_thread_;
     void subscriptionLoop();
 
-    // Worker threads — two run slow-path IQ collections concurrently.
+    /// Number of concurrent worker threads.  Two workers allow parallel fast-path
+    /// classification while IqCollector serialises slow-path SDR access.
     static constexpr int NUM_WORKERS = 2;
     std::vector<std::thread> worker_threads_;
     std::mutex  q_mu_;
@@ -68,21 +108,19 @@ private:
     std::queue<Detection> queue_;
     void workerLoop();
 
-    // Frequency-dedup: skip re-analysis of a recently-classified frequency.
-    // Key = freq_hz rounded to 100 kHz bucket. Value = last-enqueued epoch ms.
+    /// Per-frequency (100 kHz bucket) dedup: skip re-analysis within the cooldown window.
     std::unordered_map<int64_t, int64_t> recent_analyzed_;
-    // 5-minute cooldown: each unique signal is analyzed at most once per 5 min.
+    /// Cooldown: each unique signal is analysed at most once per 5 minutes.
     static constexpr int64_t REANALYSIS_COOLDOWN_MS = 300'000;
-    // Cap the backlog: 6 items / 2 workers × ~3.3s = 10s max drain.
-    // With a 3s window, 2 workers can process 2 signals concurrently.
+    /// Max queue depth: 6 items / 2 workers ≈ 10 s max drain within the 3 s analysis window.
     static constexpr size_t  MAX_QUEUE_DEPTH        = 6;
 
     void processDetection(const Detection& d);
     void publishResult(const AnalysisResult& r);
 
 #ifdef ANALYSIS_WITH_DB
-    // Connection string written once in constructor; each worker thread opens
-    // its own pqxx::connection via thread_local in persistResult().
+    /// Connection string written once in constructor.
+    /// Each worker opens its own pqxx::connection via thread_local in persistResult().
     std::string db_conn_str_;
     void persistResult(const AnalysisResult& r);
 #endif

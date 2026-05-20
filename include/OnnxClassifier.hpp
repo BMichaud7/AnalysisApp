@@ -1,4 +1,26 @@
 #pragma once
+/**
+ * @file OnnxClassifier.hpp
+ * @brief ONNX Runtime-based modulation classifier.
+ *
+ * OnnxClassifier loads a pre-trained modulation classifier model
+ * (`modulation_classifier.onnx`) at startup and exposes single-signal and
+ * batch inference entry points.
+ *
+ * ## Execution providers
+ * TensorRT is tried first (fp16, best throughput), then CUDA, then CPU.
+ * The first available provider is used.
+ *
+ * ## Fast path
+ * When an RF_DETECTION message includes a 1 024-sample IQ snapshot
+ * (`iq_snapshot_b64`), AnalysisEngine::analyzeSnapshot() calls
+ * OnnxClassifier::classify() directly — no SDR re-acquisition, no feature
+ * extraction.  Classification latency: ~5 ms on GPU.
+ *
+ * ## Compilation
+ * The class compiles to a no-op stub when @c ANALYSIS_WITH_ONNX is not defined.
+ * loaded() returns false and classify() returns an invalid OnnxResult.
+ */
 #include "AnalysisResult.hpp"
 #include <string>
 #include <vector>
@@ -10,43 +32,71 @@
 
 namespace analysis {
 
+/// @brief ONNX model and inference configuration.
 struct OnnxConfig {
-    std::string model_path;                          // path to .onnx file
-    std::string classes_path;                        // path to .classes.json
-    bool        enabled                 = false;     // false if model_path empty
-    bool        use_gpu                 = true;      // try CUDA EP, fall back to CPU
-    bool        use_tensorrt            = true;      // try TensorRT EP before CUDA EP
-    bool        tensorrt_fp16           = true;      // fp16 kernels (RTX Tensor Cores)
-    int         tensorrt_cache_mb       = 128;       // TRT engine cache workspace (MB)
-    double      fallback_confidence     = 0.60;      // run ONNX if rule confidence < this
-    bool        fallback_on_unknown     = true;      // always run ONNX on UNKNOWN result
-    int         input_len               = 1024;      // samples per inference window
-    int         max_batch               = 8;         // max signals batched per inference call
+    std::string model_path;                  ///< Path to the @c .onnx model file.
+    std::string classes_path;                ///< Path to the @c .classes.json label file.
+    bool        enabled          = false;    ///< False when model_path is empty.
+    bool        use_gpu          = true;     ///< Try CUDA execution provider; fall back to CPU.
+    bool        use_tensorrt     = true;     ///< Try TensorRT EP before CUDA EP.
+    bool        tensorrt_fp16    = true;     ///< Use fp16 kernels (RTX Tensor Cores).
+    int         tensorrt_cache_mb= 128;      ///< TensorRT engine cache workspace (MB).
+    double      fallback_confidence = 0.60;  ///< Run ONNX when rule confidence is below this.
+    bool        fallback_on_unknown = true;  ///< Always run ONNX when rule result is UNKNOWN.
+    int         input_len        = 1024;     ///< Samples per inference window.
+    int         max_batch        = 8;        ///< Maximum signals per batch inference call.
 };
 
+/// @brief Result of one ONNX inference.
 struct OnnxResult {
-    std::string modulation;     // e.g. "BPSK", "QPSK", "FM"
-    float       confidence;     // softmax probability of top class
-    bool        valid = false;  // false if model not loaded or inference failed
+    std::string modulation;     ///< Top class label (e.g. "BPSK", "FM").
+    float       confidence;     ///< Softmax probability of the top class (0–1).
+    bool        valid = false;  ///< False when the model is not loaded or inference failed.
 };
 
+/**
+ * @brief ONNX Runtime wrapper for modulation classification.
+ *
+ * Thread-safe: const inference methods may be called from multiple threads
+ * simultaneously (ONNX Runtime sessions are thread-safe by design).
+ */
 class OnnxClassifier {
 public:
+    /**
+     * @brief Load the model from the path in @p cfg.
+     * @param cfg ONNX configuration.  If cfg.model_path is empty, the classifier
+     *            initialises as unloaded (loaded() returns false).
+     */
     explicit OnnxClassifier(const OnnxConfig& cfg);
     ~OnnxClassifier();
 
+    /// @brief True if the model was loaded successfully.
     bool loaded() const { return loaded_; }
 
-    // Single signal inference.
+    /**
+     * @brief Classify one signal.
+     * @param iq_cf32         Interleaved float32 IQ samples (length = OnnxConfig::input_len).
+     * @param sample_rate_sps Sample rate (samples/s); may be used for normalisation.
+     * @return OnnxResult with valid = true on success.
+     */
     OnnxResult classify(const std::vector<float>& iq_cf32,
                         double sample_rate_sps) const;
 
-    // Batch inference — amortises GPU launch overhead across multiple signals.
-    // Up to max_batch signals; faster than calling classify() in a loop.
+    /**
+     * @brief Batch classify multiple signals in one GPU launch.
+     *
+     * Faster than calling classify() in a loop when multiple signals are ready.
+     * At most OnnxConfig::max_batch signals are processed per call.
+     *
+     * @param signals         Per-signal IQ vectors (each length = OnnxConfig::input_len).
+     * @param sample_rate_sps Common sample rate for all signals.
+     * @return One OnnxResult per input signal (same order).
+     */
     std::vector<OnnxResult> classifyBatch(
         const std::vector<std::vector<float>>& signals,
         double sample_rate_sps) const;
 
+    /// @brief Class label names in softmax output order.
     const std::vector<std::string>& classNames() const { return class_names_; }
 
 private:

@@ -432,10 +432,7 @@ void AnalysisService::persistResult(const AnalysisResult& r)
 {
     if (db_conn_str_.empty()) return;
 
-    // One pqxx::connection per worker thread — pqxx connections are not thread-safe.
-    // thread_local gives each thread its own instance without any locking.
     thread_local std::unique_ptr<pqxx::connection> t_conn;
-
     if (!t_conn || !t_conn->is_open()) {
         try {
             t_conn = std::make_unique<pqxx::connection>(db_conn_str_);
@@ -446,55 +443,156 @@ void AnalysisService::persistResult(const AnalysisResult& r)
         }
     }
 
-    auto opt_str = [](const std::string& s) -> std::optional<std::string> {
-        return s.empty() ? std::nullopt : std::optional<std::string>{s};
-    };
+    // Build combined modulation string: prefer digital; append M-ary order.
+    std::string mod = r.digital_modulation.empty() ? r.analog_modulation
+                                                    : r.digital_modulation;
+    if (!r.digital_modulation.empty() && r.m_ary > 1)
+        mod += "-" + std::to_string(r.m_ary);
 
-    std::optional<std::string> hyp_sys, hyp_cat;
-    std::optional<float> hyp_conf;
+    const std::string mod_class = mod.empty()                      ? "unclassified"
+                                  : !r.digital_modulation.empty()  ? "digital"
+                                                                    : "analog";
+
+    std::string hyp_sys, hyp_cat;
+    float hyp_conf = 0.f;
     if (!r.hypotheses.empty()) {
         hyp_sys  = r.hypotheses[0].system;
         hyp_cat  = r.hypotheses[0].category;
         hyp_conf = r.hypotheses[0].confidence;
     }
 
+    std::optional<double> bw_opt;
+    if (r.bandwidth_hz > 0) bw_opt = r.bandwidth_hz;
+    std::optional<double> sr_opt;
+    if (r.symbol_rate_sps > 0) sr_opt = r.symbol_rate_sps;
+    std::optional<double> br_opt;
+    if (r.bit_rate_bps > 0) br_opt = r.bit_rate_bps;
+    std::optional<float> oc_opt;
+    if (r.onnx_used) oc_opt = r.onnx_confidence;
+
     try {
         pqxx::work tx{*t_conn};
-        tx.exec_params(
-            "INSERT INTO analysis_results "
-            " (detection_id,scanner_id,center_freq_hz,bandwidth_hz,snr_db,"
-            "  classified,analog_modulation,digital_modulation,"
-            "  symbol_rate_sps,bit_rate_bps,is_ofdm,is_fhss,is_burst,"
-            "  hypothesis_system,hypothesis_category,hypothesis_conf,"
-            "  rule_confidence,onnx_used,onnx_confidence,fast_path,reject_reason)"
-            " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
-            r.detection_id,
-            r.scanner_id,
-            static_cast<int64_t>(r.center_freq_hz),
-            r.bandwidth_hz > 0 ? std::optional<int>{static_cast<int>(r.bandwidth_hz)}
-                               : std::nullopt,
-            r.snr_db,
-            r.classified,
-            opt_str(r.analog_modulation),
-            opt_str(r.digital_modulation),
-            r.symbol_rate_sps > 0 ? std::optional<double>{r.symbol_rate_sps} : std::nullopt,
-            r.bit_rate_bps   > 0 ? std::optional<double>{r.bit_rate_bps}    : std::nullopt,
-            r.is_ofdm,
-            r.is_fhss,
-            r.is_burst,
-            hyp_sys,
-            hyp_cat,
-            hyp_conf,
-            r.rule_confidence,
-            r.onnx_used,
-            r.onnx_used ? std::optional<float>{r.onnx_confidence} : std::nullopt,
-            r.fast_path,
-            opt_str(r.reject_reason)
-        );
+
+        // ── Step 1: find existing row with same (freq ±10 kHz, modulation, BW ±50%) ──
+        // Same identity → this signal was seen before; update last_seen.
+        pqxx::result existing;
+        if (!mod.empty()) {
+            existing = tx.exec_params(
+                "SELECT id FROM signals "
+                "WHERE abs(freq_hz - $1) < 10000 "
+                "  AND modulation = $2 "
+                "  AND ($3::double precision IS NULL OR bandwidth_hz IS NULL "
+                "       OR abs(bandwidth_hz - $3) / GREATEST(bandwidth_hz, 1000.0) < 0.5) "
+                "ORDER BY abs(freq_hz - $1) ASC LIMIT 1",
+                r.center_freq_hz, mod, bw_opt);
+        }
+
+        if (!existing.empty()) {
+            // Known signal — refresh classification metadata and last_seen.
+            tx.exec_params(
+                "UPDATE signals SET "
+                "  last_seen       = now(), "
+                "  snr_db          = $2, "
+                "  bandwidth_hz    = COALESCE(NULLIF(bandwidth_hz, 0), $3), "
+                "  hypothesis      = $4, "
+                "  hyp_category    = $5, "
+                "  hyp_confidence  = $6, "
+                "  classified      = $7, "
+                "  rule_confidence = $8, "
+                "  onnx_used       = $9, "
+                "  onnx_confidence = $10, "
+                "  fast_path       = $11, "
+                "  reject_reason   = $12, "
+                "  hits            = hits + 1 "
+                "WHERE id = $1",
+                existing[0][0].as<long long>(),
+                r.snr_db, bw_opt,
+                hyp_sys, hyp_cat, hyp_conf,
+                r.classified, r.rule_confidence,
+                r.onnx_used, oc_opt, r.fast_path, r.reject_reason);
+
+        } else {
+            // ── Step 2: find unclassified row planted by AcquisitionApp ──
+            // Same freq + similar BW, not yet classified → fill in modulation.
+            auto unclass = tx.exec_params(
+                "SELECT id FROM signals "
+                "WHERE abs(freq_hz - $1) < 10000 "
+                "  AND classified = false "
+                "  AND ($2::double precision IS NULL OR bandwidth_hz IS NULL "
+                "       OR abs(bandwidth_hz - $2) / GREATEST(bandwidth_hz, 1000.0) < 0.5) "
+                "  AND last_seen > now() - interval '10 minutes' "
+                "ORDER BY abs(freq_hz - $1) ASC LIMIT 1",
+                r.center_freq_hz, bw_opt);
+
+            if (!unclass.empty()) {
+                // Promote unclassified row → classified signal.
+                tx.exec_params(
+                    "UPDATE signals SET "
+                    "  last_seen       = now(), "
+                    "  freq_hz         = $2, "
+                    "  freq_mhz        = $3, "
+                    "  bandwidth_hz    = COALESCE(NULLIF(bandwidth_hz, 0), $4), "
+                    "  snr_db          = $5, "
+                    "  modulation      = $6, "
+                    "  mod_class       = $7, "
+                    "  is_ofdm         = $8, "
+                    "  is_burst        = $9, "
+                    "  is_fhss         = $10, "
+                    "  symbol_rate_sps = $11, "
+                    "  bit_rate_bps    = $12, "
+                    "  hypothesis      = $13, "
+                    "  hyp_category    = $14, "
+                    "  hyp_confidence  = $15, "
+                    "  classified      = $16, "
+                    "  rule_confidence = $17, "
+                    "  onnx_used       = $18, "
+                    "  onnx_confidence = $19, "
+                    "  fast_path       = $20, "
+                    "  reject_reason   = $21, "
+                    "  hits            = hits + 1 "
+                    "WHERE id = $1",
+                    unclass[0][0].as<long long>(),
+                    r.center_freq_hz, r.center_freq_hz / 1e6, bw_opt,
+                    r.snr_db, mod, mod_class,
+                    r.is_ofdm, r.is_burst, r.is_fhss,
+                    sr_opt, br_opt,
+                    hyp_sys, hyp_cat, hyp_conf,
+                    r.classified, r.rule_confidence,
+                    r.onnx_used, oc_opt, r.fast_path, r.reject_reason);
+
+            } else {
+                // ── Step 3: entirely new signal — insert classified row ──
+                // Happens when AnalysisApp classifies a freq without a prior
+                // AcquisitionApp detection (e.g. replay), or when the unclassified
+                // row has expired.
+                tx.exec_params(
+                    "INSERT INTO signals "
+                    "(first_seen, last_seen, freq_hz, freq_mhz, bandwidth_hz, snr_db, "
+                    " scanner_id, modulation, mod_class, is_ofdm, is_burst, is_fhss, "
+                    " symbol_rate_sps, bit_rate_bps, "
+                    " hypothesis, hyp_category, hyp_confidence, "
+                    " classified, rule_confidence, onnx_used, onnx_confidence, "
+                    " fast_path, reject_reason) "
+                    "VALUES (now(), now(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, "
+                    "        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
+                    r.center_freq_hz, r.center_freq_hz / 1e6, bw_opt,
+                    r.snr_db, r.scanner_id,
+                    mod, mod_class,
+                    r.is_ofdm, r.is_burst, r.is_fhss,
+                    sr_opt, br_opt,
+                    hyp_sys, hyp_cat, hyp_conf,
+                    r.classified, r.rule_confidence,
+                    r.onnx_used, oc_opt, r.fast_path, r.reject_reason);
+            }
+        }
+
         tx.commit();
+        spdlog::debug("AnalysisService: persisted {:.3f} MHz mod={}",
+                      r.center_freq_hz / 1e6, mod.empty() ? "(none)" : mod);
+
     } catch (const std::exception& ex) {
         spdlog::warn("AnalysisService: DB write failed: {}", ex.what());
-        t_conn.reset();   // force reconnect on next call
+        t_conn.reset();
     }
 }
 #endif
