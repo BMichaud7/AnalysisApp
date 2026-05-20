@@ -60,8 +60,9 @@ private:
     std::thread sub_thread_;
     void subscriptionLoop();
 
-    // Worker thread
-    std::thread worker_thread_;
+    // Worker threads — two run slow-path IQ collections concurrently.
+    static constexpr int NUM_WORKERS = 2;
+    std::vector<std::thread> worker_threads_;
     std::mutex  q_mu_;
     std::condition_variable q_cv_;
     std::queue<Detection> queue_;
@@ -72,17 +73,16 @@ private:
     std::unordered_map<int64_t, int64_t> recent_analyzed_;
     // 5-minute cooldown: each unique signal is analyzed at most once per 5 min.
     static constexpr int64_t REANALYSIS_COOLDOWN_MS = 300'000;
-    // Cap the backlog: 3 items × ~165ms slow-path = 500ms worst case,
-    // well within the 3s analysis_pause_ms window.
-    static constexpr size_t  MAX_QUEUE_DEPTH        = 3;
+    // Cap the backlog: 6 items / 2 workers × ~3.3s = 10s max drain.
+    // With a 3s window, 2 workers can process 2 signals concurrently.
+    static constexpr size_t  MAX_QUEUE_DEPTH        = 6;
 
     void processDetection(const Detection& d);
     void publishResult(const AnalysisResult& r);
 
 #ifdef ANALYSIS_WITH_DB
-    // Persistent connection to analysis_results table.
-    // Owned exclusively by workerLoop — no locking needed.
-    std::unique_ptr<pqxx::connection> db_conn_;
+    // Connection string written once in constructor; each worker thread opens
+    // its own pqxx::connection via thread_local in persistResult().
     std::string db_conn_str_;
     void persistResult(const AnalysisResult& r);
 #endif

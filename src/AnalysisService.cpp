@@ -188,13 +188,9 @@ AnalysisService::AnalysisService(const AppConfig& cfg)
                        " dbname="  + cfg.db.dbname +
                        " user="    + cfg.db.user +
                        " password=" + cfg.db.password;
-        try {
-            db_conn_ = std::make_unique<pqxx::connection>(db_conn_str_);
-            spdlog::info("AnalysisService: connected to DB {}:{}/{}",
-                         cfg.db.host, cfg.db.port, cfg.db.dbname);
-        } catch (const std::exception& ex) {
-            spdlog::warn("AnalysisService: DB connection failed (will retry): {}", ex.what());
-        }
+        // Connection is opened per-worker thread on first use; just log the intent here.
+        spdlog::info("AnalysisService: DB persistence enabled ({}:{}/{})",
+                     cfg.db.host, cfg.db.port, cfg.db.dbname);
     }
 #endif
 }
@@ -208,8 +204,10 @@ void AnalysisService::start()
 {
     if (running_.exchange(true)) return;
 
-    // Worker thread starts first (publisher ready before subs fire)
-    worker_thread_ = std::thread(&AnalysisService::workerLoop, this);
+    // Worker threads start first (publisher ready before subs fire).
+    worker_threads_.reserve(NUM_WORKERS);
+    for (int i = 0; i < NUM_WORKERS; ++i)
+        worker_threads_.emplace_back(&AnalysisService::workerLoop, this);
 
     // Subscription thread
     sub_thread_ = std::thread(&AnalysisService::subscriptionLoop, this);
@@ -228,8 +226,9 @@ void AnalysisService::stop()
         amqp_container_->stop();
     }
 
-    if (sub_thread_.joinable())    sub_thread_.join();
-    if (worker_thread_.joinable()) worker_thread_.join();
+    if (sub_thread_.joinable()) sub_thread_.join();
+    for (auto& t : worker_threads_)
+        if (t.joinable()) t.join();
 
     spdlog::info("AnalysisService: stopped");
 }
@@ -433,13 +432,16 @@ void AnalysisService::persistResult(const AnalysisResult& r)
 {
     if (db_conn_str_.empty()) return;
 
-    // Reconnect if the connection was lost.
-    if (!db_conn_ || !db_conn_->is_open()) {
+    // One pqxx::connection per worker thread — pqxx connections are not thread-safe.
+    // thread_local gives each thread its own instance without any locking.
+    thread_local std::unique_ptr<pqxx::connection> t_conn;
+
+    if (!t_conn || !t_conn->is_open()) {
         try {
-            db_conn_ = std::make_unique<pqxx::connection>(db_conn_str_);
+            t_conn = std::make_unique<pqxx::connection>(db_conn_str_);
         } catch (const std::exception& ex) {
-            spdlog::warn("AnalysisService: DB reconnect failed: {}", ex.what());
-            db_conn_.reset();
+            spdlog::warn("AnalysisService: DB connect failed: {}", ex.what());
+            t_conn.reset();
             return;
         }
     }
@@ -457,7 +459,7 @@ void AnalysisService::persistResult(const AnalysisResult& r)
     }
 
     try {
-        pqxx::work tx{*db_conn_};
+        pqxx::work tx{*t_conn};
         tx.exec_params(
             "INSERT INTO analysis_results "
             " (detection_id,scanner_id,center_freq_hz,bandwidth_hz,snr_db,"
@@ -492,7 +494,7 @@ void AnalysisService::persistResult(const AnalysisResult& r)
         tx.commit();
     } catch (const std::exception& ex) {
         spdlog::warn("AnalysisService: DB write failed: {}", ex.what());
-        db_conn_.reset();   // force reconnect on next call
+        t_conn.reset();   // force reconnect on next call
     }
 }
 #endif
