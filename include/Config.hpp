@@ -43,7 +43,9 @@ struct EngineConfig {
     double     guard_band_fraction = 0.1;  ///< Fraction of bandwidth treated as roll-off guard.
     double     snr_threshold_db    = 5.0;  ///< Minimum SNR to attempt classification (dB).
     int        rank                = 2;    ///< Task rank: 2=Ana (preempts Acq=1, preempted by DF=3).
-    OnnxConfig onnx;                       ///< Optional ONNX classifier configuration.
+    OnnxConfig onnx;                       ///< High-SNR ONNX classifier.
+    OnnxConfig onnx_low_snr;               ///< Low-SNR ONNX classifier (optional).
+    double     snr_model_split_db  = 8.0;  ///< SNR below which onnx_low_snr is used.
 };
 
 /// @brief PostgreSQL persistence configuration.

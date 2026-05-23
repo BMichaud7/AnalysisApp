@@ -161,14 +161,16 @@ def mixup_loss(crit, logits, y_a, y_b, lam):
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
-def train(model:      nn.Module,
-          loader:     DataLoader,
-          val_loader: DataLoader,
-          device:     torch.device,
-          epochs:     int,
-          lr:         float = 1e-3,
-          use_mixup:  bool  = True,
-          warmup_epochs: int = 5) -> nn.Module:
+def train(model:       nn.Module,
+          loader:      DataLoader,
+          val_loader:  DataLoader,
+          device:      torch.device,
+          epochs:      int,
+          lr:          float = 1e-3,
+          use_mixup:   bool  = True,
+          warmup_epochs: int = 5,
+          ckpt_path:   str | None = None,
+          class_weights: torch.Tensor | None = None) -> nn.Module:
 
     opt  = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
@@ -180,7 +182,8 @@ def train(model:      nn.Module,
         return 0.5 * (1.0 + math.cos(math.pi * prog))
 
     sched = optim.lr_scheduler.LambdaLR(opt, lr_lambda)
-    crit  = nn.CrossEntropyLoss(label_smoothing=0.1)   # reduces overconfidence
+    w = class_weights.to(device) if class_weights is not None else None
+    crit  = nn.CrossEntropyLoss(weight=w, label_smoothing=0.1)
     best_acc   = 0.0
     best_state = None
 
@@ -222,6 +225,8 @@ def train(model:      nn.Module,
         if val_acc > best_acc:
             best_acc   = val_acc
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            if ckpt_path:
+                torch.save(best_state, ckpt_path)
 
     print(f"\nBest val accuracy: {best_acc:.3f}")
     if best_state:
@@ -324,7 +329,8 @@ def main() -> None:
     if args.model == "cnn":
         model = RadioCNN(num_classes=num_classes, input_len=input_len)
     elif args.model == "resnet":
-        model = RadioResNet(num_classes=num_classes, input_len=input_len)
+        model = RadioResNet(num_classes=num_classes, input_len=input_len,
+                            channels=160, n_blocks=12)
     else:
         model = RadioFusion(num_classes=num_classes, input_len=input_len)
 
@@ -332,10 +338,22 @@ def main() -> None:
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Parameters: {n_params:,}")
 
+    # ── Class weights (inverse frequency, capped at 10×) ─────────────────────
+    train_y = y[train_ds.indices]
+    counts  = torch.bincount(train_y, minlength=num_classes).float()
+    weights = 1.0 / (counts + 1.0)
+    weights = (weights / weights.mean()).clamp(max=10.0)
+    print("  Class weights (top 5 heaviest):")
+    top = weights.argsort(descending=True)[:5]
+    for i in top:
+        print(f"    {class_names[i]:15s} {weights[i]:.2f}x  ({int(counts[i])} samples)")
+
     # ── Train ─────────────────────────────────────────────────────────────────
+    ckpt_path = args.out.replace(".onnx", ".best.pt")
     model = train(model, train_loader, val_loader, device,
                   epochs=args.epochs, lr=args.lr,
-                  use_mixup=True, warmup_epochs=min(5, args.epochs // 10))
+                  use_mixup=True, warmup_epochs=min(5, args.epochs // 10),
+                  ckpt_path=ckpt_path, class_weights=weights)
 
     # ── Test + report ─────────────────────────────────────────────────────────
     print("\n── Test Set Evaluation ──")

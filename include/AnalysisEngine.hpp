@@ -103,6 +103,7 @@ private:
     ModulationClassifier classifier_;
     ProtocolMapper       mapper_;
     OnnxClassifier       onnx_;
+    OnnxClassifier       onnx_low_snr_;
 };
 
 } // namespace analysis

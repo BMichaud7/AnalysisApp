@@ -107,6 +107,22 @@ AppConfig parseConfig(const std::string& xml_path)
                 xmlText(onnx_el, "fallback_on_unknown", "true") != "false";
             cfg.engine.onnx.enabled = !cfg.engine.onnx.model_path.empty();
         }
+
+        // <engine><onnx_low_snr> — optional low-SNR fallback model
+        cfg.engine.snr_model_split_db = xmlDouble(eng_el, "snr_model_split_db", 8.0);
+        const auto* onnx_low_el = eng_el->FirstChildElement("onnx_low_snr");
+        if (onnx_low_el) {
+            cfg.engine.onnx_low_snr.model_path        = xmlText  (onnx_low_el, "model_path",  "");
+            cfg.engine.onnx_low_snr.classes_path      = xmlText  (onnx_low_el, "classes_path","");
+            cfg.engine.onnx_low_snr.use_gpu           = xmlText  (onnx_low_el, "use_gpu",     "false") != "false";
+            cfg.engine.onnx_low_snr.input_len         = xmlInt   (onnx_low_el, "input_len",   512);
+            cfg.engine.onnx_low_snr.max_batch         = xmlInt   (onnx_low_el, "max_batch",   8);
+            cfg.engine.onnx_low_snr.fallback_confidence =
+                xmlDouble(onnx_low_el, "fallback_confidence_threshold", 0.45);
+            cfg.engine.onnx_low_snr.fallback_on_unknown =
+                xmlText(onnx_low_el, "fallback_on_unknown", "true") != "false";
+            cfg.engine.onnx_low_snr.enabled = !cfg.engine.onnx_low_snr.model_path.empty();
+        }
     }
 
     // <database> — optional PostgreSQL result persistence

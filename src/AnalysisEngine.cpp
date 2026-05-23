@@ -8,6 +8,7 @@ AnalysisEngine::AnalysisEngine(const EngineConfig& cfg)
     : cfg_(cfg)
     , extractor_(static_cast<int>(cfg.fft_size))
     , onnx_(cfg.onnx)
+    , onnx_low_snr_(cfg.onnx_low_snr)
 {}
 
 // ── Rule confidence heuristic ─────────────────────────────────────────────────
@@ -80,20 +81,8 @@ AnalysisResult AnalysisEngine::analyze(const std::vector<float>& iq_cf32,
         return result;
     }
 
-    // ── ONNX inference — launched eagerly before feature extraction ───────
-    // ONNX operates on raw IQ only (no features needed) and completes in
-    // <1 ms (TRT) or ~8 ms (CPU), while feature extraction takes 20–50 ms.
-    // Launching both concurrently means total time ≈ feature_time alone.
-    // iq_cf32 is const and read-only; OnnxClassifier::classify is thread-safe.
-    std::future<OnnxResult> onnx_future;
-    if (onnx_.loaded()) {
-        onnx_future = std::async(std::launch::async,
-            [this, &iq_cf32, sample_rate_sps]() {
-                return onnx_.classify(iq_cf32, sample_rate_sps);
-            });
-    }
-
-    // ── Layer 0: Feature extraction (runs while ONNX inference is in flight)
+    // ── Layer 0: Feature extraction ──────────────────────────────────────
+    // SNR must be known before we can pick high-SNR vs low-SNR model.
     SignalFeatures features = extractor_.extract(iq_cf32, sample_rate_sps,
                                                   center_freq_hz);
     result.snr_db       = features.snr_db;
@@ -103,18 +92,21 @@ AnalysisResult AnalysisEngine::analyze(const std::vector<float>& iq_cf32,
     classifier_.classify(features, result);
     result.rule_confidence = ruleConfidence(result, features);
 
-    // ── ONNX result merge ─────────────────────────────────────────────────
-    // Collect the already-finished inference result (get() is instant because
-    // ONNX always completes before feature extraction does).
-    const auto& ocfg = cfg_.onnx;
-    if (onnx_future.valid()) {
-        auto onnx_res = onnx_future.get();
+    // ── ONNX inference — pick model based on measured SNR ─────────────────
+    const bool use_low_snr_model = (features.snr_db < cfg_.snr_model_split_db)
+                                   && onnx_low_snr_.loaded();
+    const OnnxClassifier& active_onnx = use_low_snr_model ? onnx_low_snr_ : onnx_;
+    const OnnxConfig&     ocfg        = use_low_snr_model ? cfg_.onnx_low_snr : cfg_.onnx;
+
+    if (active_onnx.loaded()) {
+        auto onnx_res = active_onnx.classify(iq_cf32, sample_rate_sps);
         bool use_onnx = onnx_res.valid && (
             (ocfg.fallback_on_unknown && result.rule_confidence == 0.f) ||
             (result.rule_confidence   <  static_cast<float>(ocfg.fallback_confidence))
         );
         if (use_onnx) {
-            spdlog::debug("AnalysisEngine: ONNX override rule={} ({:.0f}%) → {} ({:.0f}%)",
+            spdlog::debug("AnalysisEngine: ONNX{} override rule={} ({:.0f}%) → {} ({:.0f}%)",
+                          use_low_snr_model ? "[low-SNR]" : "",
                           result.digital_modulation.empty()
                               ? result.analog_modulation : result.digital_modulation,
                           result.rule_confidence * 100.f,

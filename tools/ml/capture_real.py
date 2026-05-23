@@ -61,38 +61,86 @@ TUNE_OVERHEAD_S = 6.0
 # _NOISE: quiet channel for hardware impairment measurement.
 
 TARGETS: list[tuple] = [
-    # ── FM broadcast (FM_WB) ─────────────────────────────────────────────────
-    ("FM_WB",  89.1e6,  2e6, 2e6, 20, 6000),
-    ("FM_WB",  90.4e6,  2e6, 2e6, 20, 6000),
-    ("FM_WB",  91.7e6,  2e6, 2e6, 20, 6000),
-    ("FM_WB",  93.1e6,  2e6, 2e6, 20, 6000),
-    ("FM_WB", 100.8e6,  2e6, 2e6, 20, 6000),
-    ("FM_WB", 102.3e6,  2e6, 2e6, 20, 6000),
-    ("FM_WB", 106.4e6,  2e6, 2e6, 20, 6000),
+    # ── ILS Localizer (AM_DSB) — 108.1–111.975 MHz, odd-tenth channels ───────
+    # Carrier + 90 Hz + 150 Hz tones; capture at narrow BW to stay on signal
+    ("AM_DSB", 108.100e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 108.300e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 108.500e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 108.700e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 108.900e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 109.100e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 109.300e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 109.500e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 109.700e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 110.100e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 110.300e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 110.500e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 110.700e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 110.900e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 111.100e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 111.300e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 111.500e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 111.700e6, 0.5e6, 0.5e6, 30, 3000),
+    ("AM_DSB", 111.900e6, 0.5e6, 0.5e6, 30, 3000),
 
-    # ── Aviation AM (AM_DSB) ─────────────────────────────────────────────────
-    ("AM_DSB", 121.5e6,  1e6, 1e6, 30, 4000),   # international guard
-    ("AM_DSB", 123.45e6, 1e6, 1e6, 30, 4000),   # air-to-air
-    ("AM_DSB", 126.45e6, 1e6, 1e6, 30, 4000),
-    ("AM_DSB", 127.0e6,  1e6, 1e6, 30, 4000),
-    ("AM_DSB", 128.0e6,  1e6, 1e6, 30, 4000),
-    ("AM_DSB", 132.7e6,  1e6, 1e6, 30, 4000),
+    # ── FM broadcast (FM_WB) — always present ────────────────────────────────
+    ("FM_WB",  89.1e6,  2e6,  2e6,  20, 6000),
+    ("FM_WB",  90.4e6,  2e6,  2e6,  20, 6000),
+    ("FM_WB",  91.7e6,  2e6,  2e6,  20, 6000),
+    ("FM_WB",  93.1e6,  2e6,  2e6,  20, 6000),
+    ("FM_WB", 100.8e6,  2e6,  2e6,  20, 6000),
+    ("FM_WB", 102.3e6,  2e6,  2e6,  20, 6000),
+    ("FM_WB", 106.4e6,  2e6,  2e6,  20, 6000),
 
-    # ── NOAA Weather Radio (FM_NB, always broadcasting) ──────────────────────
-    ("FM_NB", 162.400e6, 1e6, 1e6, 20, 5000),
-    ("FM_NB", 162.425e6, 1e6, 1e6, 20, 5000),
-    ("FM_NB", 162.450e6, 1e6, 1e6, 20, 5000),
-    ("FM_NB", 162.475e6, 1e6, 1e6, 20, 5000),
-    ("FM_NB", 162.500e6, 1e6, 1e6, 20, 5000),
-    ("FM_NB", 162.525e6, 1e6, 1e6, 20, 5000),
-    ("FM_NB", 162.550e6, 1e6, 1e6, 20, 5000),
+    # ── Aviation AM (AM_DSB) — intermittent, guard freq usually active ────────
+    ("AM_DSB", 121.5e6,  1e6,  1e6,  30, 4000),   # international guard
+    ("AM_DSB", 123.45e6, 1e6,  1e6,  30, 4000),   # air-to-air
+    ("AM_DSB", 126.45e6, 1e6,  1e6,  30, 4000),
+    ("AM_DSB", 127.0e6,  1e6,  1e6,  30, 4000),
+    ("AM_DSB", 128.0e6,  1e6,  1e6,  30, 4000),
+    ("AM_DSB", 132.7e6,  1e6,  1e6,  30, 4000),
+
+    # ── FSK — APRS digipeaters (always active in populated areas) ────────────
+    ("FSK", 144.390e6,  0.5e6, 0.5e6, 60, 3000),  # APRS national 1200-baud
+
+    # ── NOAA Weather Radio (FM_NB) — always broadcasting ─────────────────────
+    ("FM_NB", 162.400e6, 1e6,  1e6,  20, 5000),
+    ("FM_NB", 162.425e6, 1e6,  1e6,  20, 5000),
+    ("FM_NB", 162.450e6, 1e6,  1e6,  20, 5000),
+    ("FM_NB", 162.475e6, 1e6,  1e6,  20, 5000),
+    ("FM_NB", 162.500e6, 1e6,  1e6,  20, 5000),
+    ("FM_NB", 162.525e6, 1e6,  1e6,  20, 5000),
+    ("FM_NB", 162.550e6, 1e6,  1e6,  20, 5000),
 
     # ── Maritime VHF (FM_NB) ─────────────────────────────────────────────────
-    ("FM_NB", 156.800e6, 1e6, 1e6, 20, 3000),   # ch.16 guard/distress
-    ("FM_NB", 156.000e6, 1e6, 1e6, 20, 3000),   # ch.01
+    ("FM_NB", 156.800e6, 1e6,  1e6,  20, 3000),   # ch.16 guard/distress
+    ("FM_NB", 156.000e6, 1e6,  1e6,  20, 3000),   # ch.01
+
+    # ── GMSK — paging band (POCSAG/Flex, continuous broadcast) ───────────────
+    ("GMSK", 152.000e6, 1e6,  1e6,  30, 3000),
+    ("GMSK", 152.480e6, 1e6,  1e6,  30, 3000),
+    ("GMSK", 157.450e6, 1e6,  1e6,  20, 2000),
+
+    # ── FSK — ISM 915 MHz (LoRa gateways, Z-Wave, 802.15.4, RFID) ───────────
+    ("FSK", 903.0e6,  4e6,  4e6,  30, 4000),
+    ("FSK", 915.0e6,  4e6,  4e6,  30, 4000),
+    ("FSK", 925.0e6,  4e6,  4e6,  20, 3000),
+
+    # ── OFDM — LTE cellular downlinks (present everywhere in US) ─────────────
+    ("OFDM",  739.0e6, 12e6, 15e6, 20, 5000),   # Band 17 DL (AT&T 700)
+    ("OFDM",  751.0e6, 10e6, 12e6, 20, 5000),   # Band 13 DL (Verizon 700)
+    ("OFDM",  881.0e6, 24e6, 30e6, 20, 5000),   # Band 5 DL (850 MHz)
+    ("OFDM", 1960.0e6, 25e6, 30e6, 20, 5000),   # Band 2 DL (PCS 1900)
+    ("OFDM", 2140.0e6, 40e6, 50e6, 20, 5000),   # Band 4/66 DL (AWS)
+    ("OFDM", 2665.0e6, 40e6, 50e6, 20, 5000),   # Band 41 TDD (mid-band)
+
+    # ── GFSK — Bluetooth 2.4 GHz (present near any BT device) ───────────────
+    ("GFSK", 2420.0e6, 40e6, 40e6, 20, 4000),
+    ("GFSK", 2441.0e6, 40e6, 40e6, 20, 4000),
+    ("GFSK", 2462.0e6, 40e6, 40e6, 20, 3000),
 
     # ── Noise-only capture for PlutoSDR impairment measurement ───────────────
-    ("_NOISE", 500.0e6,  2e6, 2e6, 10, 0),
+    ("_NOISE", 500.0e6,  2e6,  2e6,  10, 0),
 ]
 
 
@@ -205,7 +253,7 @@ def request_capture(sess: Session,
     resp = sess.rpc({
         "msg_type": "TASK_REQUEST", "schema_version": "2.0",
         "request_id": rid, "timestamp_ms": int(time.time() * 1000),
-        "task_type": "WIDEBAND", "rank": 1,
+        "task_type": "WIDEBAND", "rank": 5,
         "schedule": {
             "mode": "IMMEDIATE",
             "duration_ms": int((dwell_s + TUNE_OVERHEAD_S + 1) * 1000),
