@@ -47,9 +47,10 @@ IQ_MAGIC = 0x49515030
 WINDOW = 512    # samples per window — must match model input_len
 STRIDE = 128    # stride between windows (75 % overlap for diversity)
 
-# Tuning overhead: PlutoSDR PLL calibration takes ~3-4 s per hop.
-# We add this to every collection window so the first packets aren't missed.
-TUNE_OVERHEAD_S = 6.0
+# AD9361 LO settles in ~25 µs after setFrequency.  The sample rate is now
+# locked (fixed_sample_rate_hz in devices.xml) so setSampleRate is never
+# called mid-session.  50 ms is a conservative margin for USB/network latency.
+TUNE_OVERHEAD_S = 0.05
 
 
 # ── Capture targets ───────────────────────────────────────────────────────────

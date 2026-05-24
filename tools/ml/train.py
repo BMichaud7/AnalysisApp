@@ -184,8 +184,10 @@ def train(model:       nn.Module,
     sched = optim.lr_scheduler.LambdaLR(opt, lr_lambda)
     w = class_weights.to(device) if class_weights is not None else None
     crit  = nn.CrossEntropyLoss(weight=w, label_smoothing=0.1)
-    best_acc   = 0.0
-    best_state = None
+    best_min_acc = 0.0  # optimise for worst-class accuracy
+    best_acc     = 0.0
+    best_state   = None
+    num_classes  = next(iter(loader))[1].max().item() + 1
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -209,26 +211,34 @@ def train(model:       nn.Module,
         sched.step()
 
         model.eval()
-        correct, total = 0, 0
+        per_correct = torch.zeros(num_classes)
+        per_total   = torch.zeros(num_classes)
         with torch.no_grad():
             for X_b, y_b in val_loader:
                 X_b, y_b = X_b.to(device), y_b.to(device)
-                preds = model(X_b).argmax(dim=1)
-                correct += (preds == y_b).sum().item()
-                total   += len(y_b)
+                preds = model(X_b).argmax(dim=1).cpu()
+                y_cpu = y_b.cpu()
+                for c in range(num_classes):
+                    mask = y_cpu == c
+                    per_correct[c] += (preds[mask] == c).sum()
+                    per_total[c]   += mask.sum()
 
-        val_acc = correct / total
-        cur_lr  = opt.param_groups[0]["lr"]
+        per_acc  = per_correct / per_total.clamp(min=1)
+        val_acc  = per_acc.mean().item()
+        min_acc  = per_acc.min().item()
+        cur_lr   = opt.param_groups[0]["lr"]
         print(f"  Epoch {epoch:3d}  loss={train_loss:.4f}  val_acc={val_acc:.3f}  "
-              f"lr={cur_lr:.2e}")
+              f"min_class={min_acc:.3f}  lr={cur_lr:.2e}")
 
-        if val_acc > best_acc:
-            best_acc   = val_acc
-            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+        # Save on improvement to worst-class accuracy (then mean as tiebreak)
+        if (min_acc > best_min_acc) or (min_acc == best_min_acc and val_acc > best_acc):
+            best_min_acc = min_acc
+            best_acc     = val_acc
+            best_state   = {k: v.clone() for k, v in model.state_dict().items()}
             if ckpt_path:
                 torch.save(best_state, ckpt_path)
 
-    print(f"\nBest val accuracy: {best_acc:.3f}")
+    print(f"\nBest val accuracy: {best_acc:.3f}  worst-class: {best_min_acc:.3f}")
     if best_state:
         model.load_state_dict(best_state)
     return model
@@ -330,7 +340,7 @@ def main() -> None:
         model = RadioCNN(num_classes=num_classes, input_len=input_len)
     elif args.model == "resnet":
         model = RadioResNet(num_classes=num_classes, input_len=input_len,
-                            channels=160, n_blocks=12)
+                            channels=128, n_blocks=8)
     else:
         model = RadioFusion(num_classes=num_classes, input_len=input_len)
 
