@@ -120,18 +120,29 @@ private:
     void publishResult(const AnalysisResult& r);
 
     /**
-     * @brief Called from the AMQP thread when a REQUEST_DEMOD command arrives.
+     * @brief Called from the AMQP thread when a demod command arrives.
      *
-     * Looks up the most recent AnalysisResult for the requested frequency and
-     * forwards it as a DEMOD_REQUEST to the rf.demod.request queue.
+     * Handles REQUEST_DEMOD, START_DEMOD_STREAM, and STOP_DEMOD_STREAM:
+     * - REQUEST_DEMOD / START_DEMOD_STREAM: looks up the most recent
+     *   AnalysisResult for @p freq_hz and forwards the appropriate message
+     *   to DemodApp via rf.demod.request.
+     * - STOP_DEMOD_STREAM: forwards immediately without a cache lookup.
      *
-     * @param freq_hz    Requested centre frequency in Hz.
+     * @param msg_type   "REQUEST_DEMOD", "START_DEMOD_STREAM", or "STOP_DEMOD_STREAM".
+     * @param freq_hz    Target frequency (used for cache lookup; ignored for STOP).
+     * @param stream_id  Stream identifier (required for STREAM variants).
      * @param request_id Correlation ID supplied by the caller (may be empty).
      */
-    void onDemodCommand(double freq_hz, const std::string& request_id);
+    void onDemodCommand(const std::string& msg_type,
+                        double freq_hz,
+                        const std::string& stream_id,
+                        const std::string& request_id);
 
-    /// @brief Forward a cached result to DemodApp as a DEMOD_REQUEST message.
-    void publishDemodRequest(const AnalysisResult& r, const std::string& request_id);
+    /// @brief Forward a cached result to DemodApp with the given msg_type.
+    void publishDemodRequest(const std::string& msg_type,
+                             const AnalysisResult& r,
+                             const std::string& stream_id,
+                             const std::string& request_id);
 
     /// @brief Cache of most-recent AnalysisResult per 100 kHz frequency bucket.
     /// Protected by q_mu_.

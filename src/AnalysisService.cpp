@@ -60,9 +60,12 @@ static std::string generateUuid()
 
 class ServiceAmqpHandler : public proton::messaging_handler {
 public:
+    using DemodCmdCb = std::function<void(const std::string&, double,
+                                         const std::string&, const std::string&)>;
+
     ServiceAmqpHandler(const AmqpConfig& cfg,
                        std::function<void(const Detection&)> on_detection,
-                       std::function<void(double, const std::string&)> on_demod_cmd)
+                       DemodCmdCb on_demod_cmd)
         : cfg_(cfg)
         , on_detection_(std::move(on_detection))
         , on_demod_cmd_(std::move(on_demod_cmd))
@@ -113,13 +116,21 @@ public:
             std::string body = proton::get<std::string>(m.body());
             auto j = json::parse(body);
 
-            // Route REQUEST_DEMOD commands to the demod command handler.
-            if (j.value("msg_type", "") == "REQUEST_DEMOD") {
-                if (on_demod_cmd_)
-                    on_demod_cmd_(j.value("freq_hz", 0.0),
-                                  j.value("request_id", std::string("")));
-                d.accept();
-                return;
+            // Route demod commands to the command handler.
+            static const std::initializer_list<const char*> k_cmd_types = {
+                "REQUEST_DEMOD", "START_DEMOD_STREAM", "STOP_DEMOD_STREAM"
+            };
+            std::string msg_type = j.value("msg_type", "");
+            for (auto* t : k_cmd_types) {
+                if (msg_type == t) {
+                    if (on_demod_cmd_)
+                        on_demod_cmd_(msg_type,
+                                      j.value("freq_hz",    0.0),
+                                      j.value("stream_id",  std::string("")),
+                                      j.value("request_id", std::string("")));
+                    d.accept();
+                    return;
+                }
             }
 
             Detection det{};
@@ -201,8 +212,8 @@ public:
 
 private:
     AmqpConfig cfg_;
-    std::function<void(const Detection&)>              on_detection_;
-    std::function<void(double, const std::string&)>    on_demod_cmd_;
+    std::function<void(const Detection&)> on_detection_;
+    DemodCmdCb                            on_demod_cmd_;
     proton::sender      pub_sender_;
     proton::sender      demod_sender_;
     proton::work_queue* work_queue_{nullptr};
@@ -296,8 +307,9 @@ void AnalysisService::subscriptionLoop()
             q_cv_.notify_one();
         };
 
-        auto on_cmd = [this](double freq_hz, const std::string& req_id){
-            onDemodCommand(freq_hz, req_id);
+        auto on_cmd = [this](const std::string& msg_type, double freq_hz,
+                             const std::string& stream_id, const std::string& req_id) {
+            onDemodCommand(msg_type, freq_hz, stream_id, req_id);
         };
         amqp_handler_ = std::make_shared<ServiceAmqpHandler>(cfg_.amqp, on_det, on_cmd);
         amqp_container_ = std::make_shared<proton::container>(*amqp_handler_);
@@ -474,11 +486,28 @@ void AnalysisService::publishResult(const AnalysisResult& r)
                  r.fast_path ? "fast" : "slow");
 }
 
-void AnalysisService::onDemodCommand(double freq_hz, const std::string& request_id)
+void AnalysisService::onDemodCommand(const std::string& msg_type,
+                                     double freq_hz,
+                                     const std::string& stream_id,
+                                     const std::string& request_id)
 {
+    // STOP_DEMOD_STREAM: forward directly — no cache lookup required.
+    if (msg_type == "STOP_DEMOD_STREAM") {
+        if (stream_id.empty()) {
+            spdlog::warn("AnalysisService: STOP_DEMOD_STREAM with no stream_id — ignored");
+            return;
+        }
+        json j;
+        j["msg_type"]  = "STOP_DEMOD_STREAM";
+        j["stream_id"] = stream_id;
+        if (amqp_handler_) amqp_handler_->publishDemodRequest(j.dump());
+        spdlog::info("AnalysisService: forwarded STOP_DEMOD_STREAM stream={}", stream_id);
+        return;
+    }
+
+    // REQUEST_DEMOD / START_DEMOD_STREAM: look up cache and forward with signal params.
     if (freq_hz <= 0) {
-        spdlog::warn("AnalysisService: REQUEST_DEMOD with invalid freq {:.3f} MHz — ignored",
-                     freq_hz / 1e6);
+        spdlog::warn("AnalysisService: {} with invalid freq — ignored", msg_type);
         return;
     }
 
@@ -488,19 +517,21 @@ void AnalysisService::onDemodCommand(double freq_hz, const std::string& request_
         std::lock_guard<std::mutex> lk(q_mu_);
         auto it = recent_results_.find(bucket);
         if (it == recent_results_.end()) {
-            spdlog::warn("AnalysisService: REQUEST_DEMOD for {:.3f} MHz — no recent result, ignored",
-                         freq_hz / 1e6);
+            spdlog::warn("AnalysisService: {} for {:.3f} MHz — no recent result, ignored",
+                         msg_type, freq_hz / 1e6);
             return;
         }
         result = it->second;
     }
 
-    spdlog::info("AnalysisService: REQUEST_DEMOD {:.3f} MHz → forwarding as DEMOD_REQUEST",
-                 freq_hz / 1e6);
-    publishDemodRequest(result, request_id);
+    spdlog::info("AnalysisService: {} {:.3f} MHz → forwarding to DemodApp",
+                 msg_type, freq_hz / 1e6);
+    publishDemodRequest(msg_type, result, stream_id, request_id);
 }
 
-void AnalysisService::publishDemodRequest(const AnalysisResult& r,
+void AnalysisService::publishDemodRequest(const std::string& msg_type,
+                                          const AnalysisResult& r,
+                                          const std::string& stream_id,
                                           const std::string& request_id)
 {
     std::string modulation = r.digital_modulation.empty()
@@ -513,7 +544,7 @@ void AnalysisService::publishDemodRequest(const AnalysisResult& r,
     }
 
     json j;
-    j["msg_type"]        = "DEMOD_REQUEST";
+    j["msg_type"]        = msg_type;
     j["request_id"]      = request_id.empty() ? generateUuid() : request_id;
     j["modulation"]      = modulation;
     j["center_freq_hz"]  = r.center_freq_hz;
@@ -521,6 +552,8 @@ void AnalysisService::publishDemodRequest(const AnalysisResult& r,
     j["symbol_rate_sps"] = r.symbol_rate_sps;
     j["confidence"]      = r.onnx_confidence;
     j["timestamp_ms"]    = r.timestamp_ms;
+    if (!stream_id.empty())
+        j["stream_id"]   = stream_id;
 
     if (amqp_handler_)
         amqp_handler_->publishDemodRequest(j.dump());
