@@ -10,6 +10,10 @@
     <analysis_topic>rf.analysis</analysis_topic>
     <task_request_queue>sdr.task.request</task_request_queue>
     <task_response_queue>sdr.task.response</task_response_queue>
+    <!-- Subscribe: REQUEST_DEMOD commands from a user app or CLI tool -->
+    <demod_commands_queue>sdr.demod.commands</demod_commands_queue>
+    <!-- Publish: DEMOD_REQUEST messages to DemodApp -->
+    <demod_request_queue>rf.demod.request</demod_request_queue>
   </amqp>
 
   <collector>

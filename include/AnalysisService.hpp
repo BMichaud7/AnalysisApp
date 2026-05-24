@@ -26,6 +26,7 @@
  */
 #include "Config.hpp"
 #include "AnalysisEngine.hpp"
+#include "AnalysisResult.hpp"
 #include "IqCollector.hpp"
 #include <atomic>
 #include <thread>
@@ -117,6 +118,24 @@ private:
 
     void processDetection(const Detection& d);
     void publishResult(const AnalysisResult& r);
+
+    /**
+     * @brief Called from the AMQP thread when a REQUEST_DEMOD command arrives.
+     *
+     * Looks up the most recent AnalysisResult for the requested frequency and
+     * forwards it as a DEMOD_REQUEST to the rf.demod.request queue.
+     *
+     * @param freq_hz    Requested centre frequency in Hz.
+     * @param request_id Correlation ID supplied by the caller (may be empty).
+     */
+    void onDemodCommand(double freq_hz, const std::string& request_id);
+
+    /// @brief Forward a cached result to DemodApp as a DEMOD_REQUEST message.
+    void publishDemodRequest(const AnalysisResult& r, const std::string& request_id);
+
+    /// @brief Cache of most-recent AnalysisResult per 100 kHz frequency bucket.
+    /// Protected by q_mu_.
+    std::unordered_map<int64_t, AnalysisResult> recent_results_;
 
 #ifdef ANALYSIS_WITH_DB
     /// Connection string written once in constructor.

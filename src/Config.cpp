@@ -66,8 +66,10 @@ AppConfig parseConfig(const std::string& xml_path)
         cfg.amqp.password            = xmlText(amqp_el, "password",             cfg.amqp.password);
         cfg.amqp.detections_topic    = xmlText(amqp_el, "detections_topic",     cfg.amqp.detections_topic);
         cfg.amqp.analysis_topic      = xmlText(amqp_el, "analysis_topic",       cfg.amqp.analysis_topic);
-        cfg.amqp.task_request_queue  = xmlText(amqp_el, "task_request_queue",   cfg.amqp.task_request_queue);
-        cfg.amqp.task_response_queue = xmlText(amqp_el, "task_response_queue",  cfg.amqp.task_response_queue);
+        cfg.amqp.task_request_queue   = xmlText(amqp_el, "task_request_queue",    cfg.amqp.task_request_queue);
+        cfg.amqp.task_response_queue  = xmlText(amqp_el, "task_response_queue",   cfg.amqp.task_response_queue);
+        cfg.amqp.demod_commands_queue = xmlText(amqp_el, "demod_commands_queue",  cfg.amqp.demod_commands_queue);
+        cfg.amqp.demod_request_queue  = xmlText(amqp_el, "demod_request_queue",   cfg.amqp.demod_request_queue);
     }
 
     // <collector>

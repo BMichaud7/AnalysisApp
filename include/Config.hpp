@@ -26,6 +26,10 @@ struct AmqpConfig {
     std::string analysis_topic      = "rf.analysis";           ///< Topic to publish analysis results.
     std::string task_request_queue  = "sdr.task.request";      ///< Queue for outbound task requests.
     std::string task_response_queue = "sdr.task.response";     ///< Queue for inbound task responses.
+    /// Queue to receive REQUEST_DEMOD commands from a user app.
+    std::string demod_commands_queue = "sdr.demod.commands";
+    /// Queue to publish DEMOD_REQUEST messages to DemodApp.
+    std::string demod_request_queue  = "rf.demod.request";
 };
 
 /// @brief IQ collection parameters for the slow path.
