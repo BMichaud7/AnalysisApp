@@ -8,6 +8,7 @@
 #include <proton/connection_options.hpp>
 #include <proton/reconnect_options.hpp>
 #include <proton/sender.hpp>
+#include <proton/target.hpp>
 #include <proton/receiver.hpp>
 #include <proton/delivery.hpp>
 #include <proton/work_queue.hpp>
