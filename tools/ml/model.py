@@ -237,7 +237,9 @@ def export_onnx(model: nn.Module,
 
     torch.onnx.export(
         model, dummy, out_path,
+        export_params=True,
         opset_version=opset,
+        dynamo=False,
         input_names=["iq_input"],
         output_names=["logits"],
         dynamic_axes={"iq_input": {0: "batch"}, "logits": {0: "batch"}},

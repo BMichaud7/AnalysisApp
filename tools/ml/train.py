@@ -184,10 +184,9 @@ def train(model:       nn.Module,
     sched = optim.lr_scheduler.LambdaLR(opt, lr_lambda)
     w = class_weights.to(device) if class_weights is not None else None
     crit  = nn.CrossEntropyLoss(weight=w, label_smoothing=0.1)
-    best_min_acc = 0.0  # optimise for worst-class accuracy
-    best_acc     = 0.0
-    best_state   = None
-    num_classes  = next(iter(loader))[1].max().item() + 1
+    best_acc    = 0.0
+    best_state  = None
+    num_classes = next(iter(loader))[1].max().item() + 1
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -230,15 +229,14 @@ def train(model:       nn.Module,
         print(f"  Epoch {epoch:3d}  loss={train_loss:.4f}  val_acc={val_acc:.3f}  "
               f"min_class={min_acc:.3f}  lr={cur_lr:.2e}")
 
-        # Save on improvement to worst-class accuracy (then mean as tiebreak)
-        if (min_acc > best_min_acc) or (min_acc == best_min_acc and val_acc > best_acc):
-            best_min_acc = min_acc
-            best_acc     = val_acc
-            best_state   = {k: v.clone() for k, v in model.state_dict().items()}
+        # Save on improvement to mean per-class validation accuracy
+        if val_acc > best_acc:
+            best_acc   = val_acc
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
             if ckpt_path:
                 torch.save(best_state, ckpt_path)
 
-    print(f"\nBest val accuracy: {best_acc:.3f}  worst-class: {best_min_acc:.3f}")
+    print(f"\nBest val accuracy: {best_acc:.3f}  (min_class this epoch: {min_acc:.3f})")
     if best_state:
         model.load_state_dict(best_state)
     return model
@@ -302,6 +300,8 @@ def main() -> None:
     ap.add_argument("--lr",      type=float, default=1e-3)
     ap.add_argument("--cuda",    action="store_true")
     ap.add_argument("--out",     default="models/classifier.onnx", metavar="ONNX")
+    ap.add_argument("--resume",  default=None, metavar="PT",
+                    help="Fine-tune from an existing checkpoint (.pt)")
     args = ap.parse_args()
 
     device = torch.device(
@@ -347,6 +347,12 @@ def main() -> None:
     model = model.to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Parameters: {n_params:,}")
+
+    if args.resume:
+        print(f"  Resuming from {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device, weights_only=True)
+        model.load_state_dict(ckpt)
+        print(f"  Checkpoint loaded.")
 
     # ── Class weights (inverse frequency, capped at 10×) ─────────────────────
     train_y = y[train_ds.indices]

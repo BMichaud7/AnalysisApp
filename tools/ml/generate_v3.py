@@ -338,17 +338,23 @@ def _gen_one(cls: str, n: int, rng: np.random.Generator) -> np.ndarray:
 
 def generate(n_per_snr: int, length: int,
              snr_min: float, snr_max: float, snr_step: float,
-             seed: int, impair: bool = True) -> tuple:
+             seed: int, impair: bool = True,
+             filter_classes: list[str] | None = None) -> tuple:
+    classes = [c for c in CLASS_NAMES if filter_classes is None or c in filter_classes]
+    if filter_classes:
+        unknown = set(filter_classes) - set(CLASS_NAMES)
+        if unknown:
+            raise ValueError(f"Unknown classes: {sorted(unknown)}")
     rng   = np.random.default_rng(seed)
     snrs  = np.arange(snr_min, snr_max + snr_step / 2, snr_step)
-    total = len(CLASS_NAMES) * len(snrs) * n_per_snr
+    total = len(classes) * len(snrs) * n_per_snr
     X     = np.empty((total, 2, length), dtype=np.float32)
     y     = np.empty(total, dtype=np.int64)
     s     = np.empty(total, dtype=np.float32)
-    label = {c: i for i, c in enumerate(CLASS_NAMES)}
+    label = {c: i for i, c in enumerate(classes)}
 
     idx = 0
-    for ci, cls in enumerate(CLASS_NAMES):
+    for ci, cls in enumerate(classes):
         for snr in snrs:
             for _ in range(n_per_snr):
                 iq = _gen_one(cls, length, rng)
@@ -360,9 +366,9 @@ def generate(n_per_snr: int, length: int,
                 y[idx]    = label[cls]
                 s[idx]    = float(snr)
                 idx += 1
-        print(f"  {ci+1:2d}/{len(CLASS_NAMES)}  {cls:<14}  {idx:,} samples", flush=True)
+        print(f"  {ci+1:2d}/{len(classes)}  {cls:<14}  {idx:,} samples", flush=True)
 
-    return X, y, s, CLASS_NAMES
+    return X, y, s, classes
 
 
 def main() -> None:
@@ -374,15 +380,20 @@ def main() -> None:
     ap.add_argument("--snr-min",   type=float, default=-10.0)
     ap.add_argument("--snr-max",   type=float, default=30.0)
     ap.add_argument("--snr-step",  type=float, default=5.0)
-    ap.add_argument("--seed",      type=int,   default=42)
-    ap.add_argument("--no-impair", action="store_true")
+    ap.add_argument("--seed",           type=int,   default=42)
+    ap.add_argument("--no-impair",      action="store_true")
+    ap.add_argument("--filter-classes", nargs="+",  metavar="CLS",
+                    help="Only generate these classes (subset of the 28)")
     args = ap.parse_args()
 
-    print(f"Generating {args.n} × {len(CLASS_NAMES)} classes × SNR {args.snr_min}:{args.snr_step}:{args.snr_max} dB")
+    filter_cls = args.filter_classes or None
+    n_cls = len(filter_cls) if filter_cls else len(CLASS_NAMES)
+    print(f"Generating {args.n} × {n_cls} classes × SNR {args.snr_min}:{args.snr_step}:{args.snr_max} dB")
     X, y, snrs, cls = generate(
         n_per_snr=args.n, length=args.len,
         snr_min=args.snr_min, snr_max=args.snr_max, snr_step=args.snr_step,
         seed=args.seed, impair=not args.no_impair,
+        filter_classes=filter_cls,
     )
     print(f"\nTotal: {len(X):,}  shape={X.shape}  ({X.nbytes/1e9:.2f} GB)")
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
