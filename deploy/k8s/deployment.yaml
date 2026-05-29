@@ -158,7 +158,7 @@ spec:
 
       containers:
         - name: sdr-analysis
-          image: ghcr.io/bmichaud7/sdr-analysis:2.4.0
+          image: ghcr.io/bmichaud7/sdr-analysis:2.5.0
           imagePullPolicy: Always
 
           env:
