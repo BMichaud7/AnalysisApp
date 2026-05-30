@@ -63,7 +63,7 @@ private:
 
     bool detectFhss(const std::vector<std::complex<float>>& x,
                     au::QuantityD<au::Hertz> sample_rate_sps,
-                    double& hop_rate_hz_out) const;
+                    au::QuantityD<au::Hertz>& hop_rate_out) const;
 
     bool detectChirp(const std::vector<std::complex<float>>& x,
                      au::QuantityD<au::Hertz> sample_rate_sps,
@@ -71,7 +71,8 @@ private:
 
     void computeInstFreqStats(const std::vector<std::complex<float>>& x,
                                au::QuantityD<au::Hertz> sample_rate_sps,
-                               double& mean_hz, double& std_hz) const;
+                               au::QuantityD<au::Hertz>& mean,
+                               au::QuantityD<au::Hertz>& std_dev) const;
 
     bool detectBurst(const std::vector<std::complex<float>>& x,
                      double& duty_cycle, double& period_samples) const;

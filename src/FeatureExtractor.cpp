@@ -330,7 +330,7 @@ bool FeatureExtractor::detectOfdm(const std::vector<cf32>& x,
 
 bool FeatureExtractor::detectFhss(const std::vector<cf32>& x,
                                    au::QuantityD<au::Hertz> sample_rate_sps,
-                                   double& hop_rate_hz_out) const
+                                   au::QuantityD<au::Hertz>& hop_rate_out) const
 {
     const double sr = sample_rate_sps.in(au::hertz);
     const int total = static_cast<int>(x.size());
@@ -380,7 +380,7 @@ bool FeatureExtractor::detectFhss(const std::vector<cf32>& x,
                 ++transitions;
 
         double total_time_s = (double)total / sr;
-        hop_rate_hz_out = (double)transitions / total_time_s;
+        hop_rate_out = au::hertz((double)transitions / total_time_s);
         return true;
     }
     return false;
@@ -440,24 +440,27 @@ bool FeatureExtractor::detectChirp(const std::vector<cf32>& x,
 // ── Instantaneous frequency statistics ───────────────────────────────────────
 
 void FeatureExtractor::computeInstFreqStats(const std::vector<cf32>& x,
-                                             double sample_rate_sps,
-                                             double& mean_hz, double& std_hz) const
+                                             au::QuantityD<au::Hertz> sample_rate_sps,
+                                             au::QuantityD<au::Hertz>& mean,
+                                             au::QuantityD<au::Hertz>& std_dev) const
 {
+    const double sr = sample_rate_sps.in(au::hertz);
     const int N = static_cast<int>(x.size()) - 1;
-    if (N < 2) { mean_hz = std_hz = 0; return; }
+    if (N < 2) { mean = au::hertz(0.0); std_dev = au::hertz(0.0); return; }
 
     std::vector<double> fi(N);
     for (int i = 0; i < N; ++i) {
         cf32 prod = x[i + 1] * std::conj(x[i]);
-        fi[i] = std::arg(prod) * sample_rate_sps / (2.0 * std::numbers::pi_v<double>);
+        fi[i] = std::arg(prod) * sr / (2.0 * std::numbers::pi_v<double>);
     }
 
     double sum = std::accumulate(fi.begin(), fi.end(), 0.0);
-    mean_hz = sum / N;
+    double mean_hz = sum / N;
+    mean = au::hertz(mean_hz);
 
     double var = 0;
     for (double f : fi) var += (f - mean_hz) * (f - mean_hz);
-    std_hz = std::sqrt(var / N);
+    std_dev = au::hertz(std::sqrt(var / N));
 }
 
 // ── Burst detection ───────────────────────────────────────────────────────────
@@ -518,9 +521,10 @@ bool FeatureExtractor::detectBurst(const std::vector<cf32>& x,
 // ── Main extraction entry ─────────────────────────────────────────────────────
 
 SignalFeatures FeatureExtractor::extract(const std::vector<float>& iq,
-                                          double sample_rate_sps,
-                                          double center_freq_hz) const
+                                          au::QuantityD<au::Hertz> sample_rate_sps,
+                                          au::QuantityD<au::Hertz> center_freq_hz) const
 {
+    const double sample_rate = sample_rate_sps.in(au::hertz);
     SignalFeatures f;
     f.center_freq_hz  = center_freq_hz;
     f.sample_rate_sps = sample_rate_sps;
@@ -572,7 +576,7 @@ SignalFeatures FeatureExtractor::extract(const std::vector<float>& iq,
     while (lo > 0         && psd[lo - 1] > threshold) --lo;
     while (hi < N_psd - 1 && psd[hi + 1] > threshold) ++hi;
 
-    f.bandwidth_hz = (double)(hi - lo) * sample_rate_sps / N_psd;
+    f.bandwidth_hz = au::hertz((double)(hi - lo) * sample_rate / N_psd);
 
     // Spectral flatness in signal band (geometric mean / arithmetic mean)
     {
@@ -672,18 +676,22 @@ SignalFeatures FeatureExtractor::extract(const std::vector<float>& iq,
     computeCumulants(x, f.c40_real, f.c40_imag, f.c41_real, f.c42);
 
     // ── Symbol rate ───────────────────────────────────────────────────────
-    f.symbol_rate_sps = estimateSymbolRate(x, sample_rate_sps);
+    f.symbol_rate_sps = au::hertz(estimateSymbolRate(x, sample_rate_sps));
 
     // ── Structural features ───────────────────────────────────────────────
     double period_samp = 0;
     f.is_burst = detectBurst(x, f.burst_duty_cycle, period_samp);
     if (period_samp > 0)
-        f.burst_period_ms = period_samp / sample_rate_sps * 1000.0;
+        f.burst_period_ms = au::seconds(period_samp / sample_rate);
 
     f.ofdm_detected = detectOfdm(x, sample_rate_sps,
                                   f.ofdm_fft_size_est, f.ofdm_cp_ratio);
 
-    f.fhss_detected = detectFhss(x, sample_rate_sps, f.fhss_hop_rate_hz);
+    {
+        au::QuantityD<au::Hertz> hop_rate{au::hertz(0.0)};
+        f.fhss_detected = detectFhss(x, sample_rate_sps, hop_rate);
+        f.fhss_hop_rate_hz = hop_rate.in(au::hertz);
+    }
 
     double chirp_rate = 0;
     f.chirp_detected  = detectChirp(x, sample_rate_sps, chirp_rate);

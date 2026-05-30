@@ -16,6 +16,8 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
+#include <au/units/hertz.hh>
+#include <au/units/seconds.hh>
 
 #include <chrono>
 #include <stdexcept>
@@ -61,7 +63,7 @@ static std::string generateUuid()
 
 class ServiceAmqpHandler : public proton::messaging_handler {
 public:
-    using DemodCmdCb = std::function<void(const std::string&, double,
+    using DemodCmdCb = std::function<void(const std::string&, au::QuantityD<au::Hertz>,
                                          const std::string&, const std::string&)>;
 
     ServiceAmqpHandler(const AmqpConfig& cfg,
@@ -126,7 +128,7 @@ public:
                 if (msg_type == t) {
                     if (on_demod_cmd_)
                         on_demod_cmd_(msg_type,
-                                      j.value("freq_hz",    0.0),
+                                      au::hertz(j.value("freq_hz", 0.0)),
                                       j.value("stream_id",  std::string("")),
                                       j.value("request_id", std::string("")));
                     d.accept();
@@ -136,10 +138,10 @@ public:
 
             Detection det{};
             det.scanner_id     = j.value("scanner_id",     "unknown");
-            det.center_freq_hz = j.value("center_freq_hz", 0.0);
-            det.bandwidth_hz   = j.value("bandwidth_hz",   0.0);
+            det.center_freq_hz = au::hertz(j.value("center_freq_hz", 0.0));
+            det.bandwidth_hz   = au::hertz(j.value("bandwidth_hz",   0.0));
             det.power_db       = j.value("power_db",       0.0);
-            det.timestamp_ms   = j.value("timestamp_ms",   (int64_t)0);
+            det.timestamp_ms   = au::seconds(j.value("timestamp_ms", 0.0) * 1e-3);
 
             // Parse embedded IQ snapshot.
             // Schema >= 1.2: base64-encoded raw float32 bytes (smaller, faster).
@@ -148,11 +150,11 @@ public:
                 det.iq_snapshot = sdr::base64::decodeFloats(
                     j["iq_snapshot_b64"].get<std::string>());
                 det.snapshot_sample_rate_sps =
-                    j.value("snapshot_sample_rate_sps", 0.0);
+                    au::hertz(j.value("snapshot_sample_rate_sps", 0.0));
             } else if (j.contains("iq_snapshot") && j["iq_snapshot"].is_array()) {
                 det.iq_snapshot = j["iq_snapshot"].get<std::vector<float>>();
                 det.snapshot_sample_rate_sps =
-                    j.value("snapshot_sample_rate_sps", 0.0);
+                    au::hertz(j.value("snapshot_sample_rate_sps", 0.0));
             }
 
             on_detection_(det);
@@ -289,7 +291,7 @@ void AnalysisService::subscriptionLoop()
             // Skip re-analysis if this frequency was classified recently.
             // With fast scanning (~8s/sweep) the same signal is detected dozens
             // of times per minute; re-analyzing every hit starves the SCAN task.
-            int64_t bucket = static_cast<int64_t>(d.center_freq_hz / 100'000.0);
+            int64_t bucket = static_cast<int64_t>(d.center_freq_hz.in(au::hertz) / 100'000.0);
             auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
             {
@@ -308,7 +310,7 @@ void AnalysisService::subscriptionLoop()
             q_cv_.notify_one();
         };
 
-        auto on_cmd = [this](const std::string& msg_type, double freq_hz,
+        auto on_cmd = [this](const std::string& msg_type, au::QuantityD<au::Hertz> freq_hz,
                              const std::string& stream_id, const std::string& req_id) {
             onDemodCommand(msg_type, freq_hz, stream_id, req_id);
         };
@@ -358,8 +360,9 @@ static constexpr float FAST_PATH_THRESHOLD = 0.75f;
 void AnalysisService::processDetection(const Detection& d)
 {
     std::string req_id = generateUuid();
+    const double center_raw = d.center_freq_hz.in(au::hertz);
     spdlog::info("AnalysisService: processing {:.3f} MHz req={} snapshot={}",
-                 d.center_freq_hz / 1e6, req_id,
+                 center_raw / 1e6, req_id,
                  d.iq_snapshot.empty() ? "no" : "yes");
 
     // ── Fast path: ONNX directly from the embedded snapshot ──────────────────
@@ -367,17 +370,18 @@ void AnalysisService::processDetection(const Detection& d)
     // no SDR re-acquisition needed. If ONNX confidence exceeds the threshold,
     // publish the result immediately (typically < 5 ms from detection receive).
     if (!d.iq_snapshot.empty() && engine_.onnxLoaded()) {
+        au::QuantityD<au::Hertz> snap_sr =
+            d.snapshot_sample_rate_sps.in(au::hertz) > 0
+                ? d.snapshot_sample_rate_sps
+                : au::hertz(cfg_.collector.analysis_sample_rate_sps);
         AnalysisResult fast = engine_.analyzeSnapshot(
-            d.iq_snapshot,
-            d.snapshot_sample_rate_sps > 0 ? d.snapshot_sample_rate_sps
-                                           : cfg_.collector.analysis_sample_rate_sps,
-            d.center_freq_hz, req_id, cfg_.scanner_id);
+            d.iq_snapshot, snap_sr, d.center_freq_hz, req_id, cfg_.scanner_id);
         fast.timestamp_ms = d.timestamp_ms;
 
         if (fast.onnx_confidence >= FAST_PATH_THRESHOLD) {
             spdlog::info("AnalysisService: fast-path {:.3f} MHz → {} ({:.0f}%) — "
                          "skipping collection",
-                         d.center_freq_hz / 1e6,
+                         center_raw / 1e6,
                          fast.digital_modulation.empty()
                              ? fast.analog_modulation : fast.digital_modulation,
                          fast.onnx_confidence * 100.f);
@@ -394,12 +398,13 @@ void AnalysisService::processDetection(const Detection& d)
     auto iq = collector_.collect(d.center_freq_hz, d.bandwidth_hz, req_id);
     if (iq.empty()) {
         spdlog::warn("AnalysisService: no IQ collected for {:.3f} MHz",
-                     d.center_freq_hz / 1e6);
+                     center_raw / 1e6);
         return;
     }
 
-    double sr = collector_.lastSampleRate();
-    if (sr <= 0) sr = cfg_.collector.analysis_sample_rate_sps;
+    au::QuantityD<au::Hertz> sr = collector_.lastSampleRate();
+    if (sr.in(au::hertz) <= 0)
+        sr = au::hertz(cfg_.collector.analysis_sample_rate_sps);
 
     AnalysisResult result = engine_.analyze(iq, sr, d.center_freq_hz,
                                              req_id, cfg_.scanner_id);
@@ -414,9 +419,9 @@ void AnalysisService::publishResult(const AnalysisResult& r)
     j["msg_type"]       = "ANALYSIS_RESULT";
     j["detection_id"]   = r.detection_id;
     j["scanner_id"]     = r.scanner_id;
-    j["timestamp_ms"]   = r.timestamp_ms;
-    j["center_freq_hz"] = r.center_freq_hz;
-    j["bandwidth_hz"]   = r.bandwidth_hz;
+    j["timestamp_ms"]   = r.timestamp_ms.in(au::seconds) * 1e3;
+    j["center_freq_hz"] = r.center_freq_hz.in(au::hertz);
+    j["bandwidth_hz"]   = r.bandwidth_hz.in(au::hertz);
     j["snr_db"]         = r.snr_db;
     j["classified"]     = r.classified;
 
@@ -426,7 +431,7 @@ void AnalysisService::publishResult(const AnalysisResult& r)
     }
     if (!r.digital_modulation.empty()) {
         j["modulation"]["digital"]          = r.digital_modulation;
-        j["modulation"]["symbol_rate_sps"]  = r.symbol_rate_sps;
+        j["modulation"]["symbol_rate_sps"]  = r.symbol_rate_sps.in(au::hertz);
         j["modulation"]["m_ary"]            = r.m_ary;
         j["modulation"]["is_ofdm"]          = r.is_ofdm;
         j["modulation"]["is_spread"]        = r.is_spread;
@@ -437,8 +442,8 @@ void AnalysisService::publishResult(const AnalysisResult& r)
     j["channel_structure"]["is_fhss"]          = r.is_fhss;
     j["channel_structure"]["is_dsss"]          = r.is_dsss;
     j["channel_structure"]["burst_duty_cycle"] = r.burst_duty_cycle;
-    if (r.ofdm_subcarrier_spacing_hz > 0)
-        j["channel_structure"]["ofdm_subcarrier_spacing_hz"] = r.ofdm_subcarrier_spacing_hz;
+    if (r.ofdm_subcarrier_spacing_hz.in(au::hertz) > 0)
+        j["channel_structure"]["ofdm_subcarrier_spacing_hz"] = r.ofdm_subcarrier_spacing_hz.in(au::hertz);
 
     j["bitstream"]["bit_rate_bps"]     = r.bit_rate_bps;
     j["bitstream"]["line_code"]        = r.line_code;
@@ -468,7 +473,7 @@ void AnalysisService::publishResult(const AnalysisResult& r)
 
     // Cache result so onDemodCommand can forward it on demand.
     {
-        int64_t bucket = static_cast<int64_t>(r.center_freq_hz / 100'000.0);
+        int64_t bucket = static_cast<int64_t>(r.center_freq_hz.in(au::hertz) / 100'000.0);
         std::lock_guard<std::mutex> lk(q_mu_);
         recent_results_[bucket] = r;
     }
@@ -482,13 +487,13 @@ void AnalysisService::publishResult(const AnalysisResult& r)
 #endif
 
     spdlog::info("AnalysisService: published result for {:.3f} MHz → '{}' ({})",
-                 r.center_freq_hz / 1e6,
+                 r.center_freq_hz.in(au::hertz) / 1e6,
                  r.hypotheses.empty() ? "unclassified" : r.hypotheses[0].system,
                  r.fast_path ? "fast" : "slow");
 }
 
 void AnalysisService::onDemodCommand(const std::string& msg_type,
-                                     double freq_hz,
+                                     au::QuantityD<au::Hertz> freq_hz,
                                      const std::string& stream_id,
                                      const std::string& request_id)
 {
@@ -507,26 +512,27 @@ void AnalysisService::onDemodCommand(const std::string& msg_type,
     }
 
     // REQUEST_DEMOD / START_DEMOD_STREAM: look up cache and forward with signal params.
-    if (freq_hz <= 0) {
+    const double freq_raw = freq_hz.in(au::hertz);
+    if (freq_raw <= 0) {
         spdlog::warn("AnalysisService: {} with invalid freq — ignored", msg_type);
         return;
     }
 
-    int64_t bucket = static_cast<int64_t>(freq_hz / 100'000.0);
+    int64_t bucket = static_cast<int64_t>(freq_raw / 100'000.0);
     AnalysisResult result;
     {
         std::lock_guard<std::mutex> lk(q_mu_);
         auto it = recent_results_.find(bucket);
         if (it == recent_results_.end()) {
             spdlog::warn("AnalysisService: {} for {:.3f} MHz — no recent result, ignored",
-                         msg_type, freq_hz / 1e6);
+                         msg_type, freq_raw / 1e6);
             return;
         }
         result = it->second;
     }
 
     spdlog::info("AnalysisService: {} {:.3f} MHz → forwarding to DemodApp",
-                 msg_type, freq_hz / 1e6);
+                 msg_type, freq_raw / 1e6);
     publishDemodRequest(msg_type, result, stream_id, request_id);
 }
 
@@ -540,7 +546,7 @@ void AnalysisService::publishDemodRequest(const std::string& msg_type,
                            : r.digital_modulation;
     if (modulation.empty()) {
         spdlog::warn("AnalysisService: publishDemodRequest — no modulation for {:.3f} MHz",
-                     r.center_freq_hz / 1e6);
+                     r.center_freq_hz.in(au::hertz) / 1e6);
         return;
     }
 
@@ -548,11 +554,11 @@ void AnalysisService::publishDemodRequest(const std::string& msg_type,
     j["msg_type"]        = msg_type;
     j["request_id"]      = request_id.empty() ? generateUuid() : request_id;
     j["modulation"]      = modulation;
-    j["center_freq_hz"]  = r.center_freq_hz;
-    j["bandwidth_hz"]    = r.bandwidth_hz;
-    j["symbol_rate_sps"] = r.symbol_rate_sps;
+    j["center_freq_hz"]  = r.center_freq_hz.in(au::hertz);
+    j["bandwidth_hz"]    = r.bandwidth_hz.in(au::hertz);
+    j["symbol_rate_sps"] = r.symbol_rate_sps.in(au::hertz);
     j["confidence"]      = r.onnx_confidence;
-    j["timestamp_ms"]    = r.timestamp_ms;
+    j["timestamp_ms"]    = r.timestamp_ms.in(au::seconds) * 1e3;
     if (!stream_id.empty())
         j["stream_id"]   = stream_id;
 
@@ -594,10 +600,14 @@ void AnalysisService::persistResult(const AnalysisResult& r)
         hyp_conf = r.hypotheses[0].confidence;
     }
 
+    const double cf_raw  = r.center_freq_hz.in(au::hertz);
+    const double bw_raw  = r.bandwidth_hz.in(au::hertz);
+    const double sr_raw  = r.symbol_rate_sps.in(au::hertz);
+
     std::optional<double> bw_opt;
-    if (r.bandwidth_hz > 0) bw_opt = r.bandwidth_hz;
+    if (bw_raw > 0) bw_opt = bw_raw;
     std::optional<double> sr_opt;
-    if (r.symbol_rate_sps > 0) sr_opt = r.symbol_rate_sps;
+    if (sr_raw > 0) sr_opt = sr_raw;
     std::optional<double> br_opt;
     if (r.bit_rate_bps > 0) br_opt = r.bit_rate_bps;
     std::optional<float> oc_opt;
@@ -617,7 +627,7 @@ void AnalysisService::persistResult(const AnalysisResult& r)
                 "  AND ($3::double precision IS NULL OR bandwidth_hz IS NULL "
                 "       OR abs(bandwidth_hz - $3) / GREATEST(bandwidth_hz, 1000.0) < 0.5) "
                 "ORDER BY abs(freq_hz - $1) ASC LIMIT 1",
-                r.center_freq_hz, mod, bw_opt);
+                cf_raw, mod, bw_opt);
         }
 
         if (!existing.empty()) {
@@ -655,7 +665,7 @@ void AnalysisService::persistResult(const AnalysisResult& r)
                 "       OR abs(bandwidth_hz - $2) / GREATEST(bandwidth_hz, 1000.0) < 0.5) "
                 "  AND last_seen > now() - interval '10 minutes' "
                 "ORDER BY abs(freq_hz - $1) ASC LIMIT 1",
-                r.center_freq_hz, bw_opt);
+                cf_raw, bw_opt);
 
             if (!unclass.empty()) {
                 // Promote unclassified row → classified signal.
@@ -685,7 +695,7 @@ void AnalysisService::persistResult(const AnalysisResult& r)
                     "  hits            = hits + 1 "
                     "WHERE id = $1",
                     unclass[0][0].as<long long>(),
-                    r.center_freq_hz, r.center_freq_hz / 1e6, bw_opt,
+                    cf_raw, cf_raw / 1e6, bw_opt,
                     r.snr_db, mod, mod_class,
                     r.is_ofdm, r.is_burst, r.is_fhss,
                     sr_opt, br_opt,
@@ -708,7 +718,7 @@ void AnalysisService::persistResult(const AnalysisResult& r)
                     " fast_path, reject_reason) "
                     "VALUES (now(), now(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, "
                     "        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
-                    r.center_freq_hz, r.center_freq_hz / 1e6, bw_opt,
+                    cf_raw, cf_raw / 1e6, bw_opt,
                     r.snr_db, r.scanner_id,
                     mod, mod_class,
                     r.is_ofdm, r.is_burst, r.is_fhss,
@@ -721,7 +731,7 @@ void AnalysisService::persistResult(const AnalysisResult& r)
 
         tx.commit();
         spdlog::debug("AnalysisService: persisted {:.3f} MHz mod={}",
-                      r.center_freq_hz / 1e6, mod.empty() ? "(none)" : mod);
+                      cf_raw / 1e6, mod.empty() ? "(none)" : mod);
 
     } catch (const std::exception& ex) {
         spdlog::warn("AnalysisService: DB write failed: {}", ex.what());
