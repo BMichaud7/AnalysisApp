@@ -28,6 +28,8 @@
 #include "AnalysisEngine.hpp"
 #include "AnalysisResult.hpp"
 #include "IqCollector.hpp"
+#include <au/units/hertz.hh>
+#include <au/units/seconds.hh>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -55,16 +57,16 @@ class ServiceAmqpHandler;  ///< Internal AMQP handler (defined in .cpp).
  * message (schema 1.2 @c iq_snapshot_b64 field) — enables the ONNX fast path.
  */
 struct Detection {
-    std::string scanner_id;
-    double      center_freq_hz;
-    double      bandwidth_hz;
-    double      power_db;
-    int64_t     timestamp_ms;
+    std::string              scanner_id;
+    au::QuantityD<au::Hertz> center_freq_hz{au::hertz(0.0)};
+    au::QuantityD<au::Hertz> bandwidth_hz{au::hertz(0.0)};
+    double                   power_db{0.0};
+    au::QuantityD<au::Seconds> timestamp_ms{au::seconds(0.0)};
 
     /// 1 024-sample CF32 IQ snapshot decoded from @c iq_snapshot_b64 (if present).
     /// Empty when not provided; used by AnalysisEngine::analyzeSnapshot().
-    std::vector<float> iq_snapshot;
-    double             snapshot_sample_rate_sps{0.0};
+    std::vector<float>       iq_snapshot;
+    au::QuantityD<au::Hertz> snapshot_sample_rate_sps{au::hertz(0.0)};
 };
 
 /**
@@ -134,7 +136,7 @@ private:
      * @param request_id Correlation ID supplied by the caller (may be empty).
      */
     void onDemodCommand(const std::string& msg_type,
-                        double freq_hz,
+                        au::QuantityD<au::Hertz> freq_hz,
                         const std::string& stream_id,
                         const std::string& request_id);
 

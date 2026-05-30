@@ -1,6 +1,8 @@
 #pragma once
 /**
  * @file Config.hpp
+ * @note Frequency/rate parameters use au::QuantityD<au::Hertz>;
+ *       duration parameters use au::QuantityD<au::Seconds>.
  * @brief Configuration structs for AnalysisApp, loaded from XML.
  *
  * parseConfig() reads analysis.xml and populates an AppConfig.
@@ -12,6 +14,8 @@
  * - OnnxConfig (in OnnxClassifier.hpp) — model path and GPU settings
  */
 #include "OnnxClassifier.hpp"
+#include <au/units/hertz.hh>
+#include <au/units/seconds.hh>
 #include <string>
 #include <cstdint>
 
@@ -34,11 +38,11 @@ struct AmqpConfig {
 
 /// @brief IQ collection parameters for the slow path.
 struct CollectorConfig {
-    double analysis_sample_rate_sps = 2'000'000.0; ///< Sample rate for IQ collection (samples/s).
+    au::QuantityD<au::Hertz>   analysis_sample_rate_sps{au::hertz(2'000'000.0)}; ///< Sample rate for IQ collection.
     /// Samples to collect per analysis.  65 536 samples at 2 MSPS = 32 ms — enough for
     /// cumulants, symbol-rate estimation, and OFDM/FHSS detection down to ~4 800 baud.
-    int    collect_samples          = 65'536;
-    int    analysis_timeout_ms      = 5000;         ///< Maximum wait for IQ task response (ms).
+    int                        collect_samples{65'536};
+    au::QuantityD<au::Seconds> analysis_timeout_ms{au::milli(au::seconds)(5000)}; ///< Maximum wait for IQ task response.
 };
 
 /// @brief Analysis pipeline configuration.

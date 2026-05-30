@@ -18,6 +18,7 @@
  * collect_mu_ serialises concurrent calls.
  */
 #include "Config.hpp"
+#include <au/units/hertz.hh>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -61,22 +62,22 @@ public:
      * @param request_id      UUID for the AMQP task request.
      * @return Interleaved float32 IQ samples (I,Q,I,Q,…), or empty on failure.
      */
-    std::vector<float> collect(double center_freq_hz,
-                               double bandwidth_hz,
+    std::vector<float> collect(au::QuantityD<au::Hertz> center_freq_hz,
+                               au::QuantityD<au::Hertz> bandwidth_hz,
                                const std::string& request_id);
 
-    /// @brief Sample rate of the last successful collect() (samples/s).
-    double lastSampleRate() const { return last_sr_; }
+    /// @brief Sample rate of the last successful collect().
+    au::QuantityD<au::Hertz> lastSampleRate() const { return last_sr_; }
 
     bool   connect()    { return true; }  ///< No-op (connection managed internally).
     void   disconnect() {}                ///< No-op (connection managed internally).
 
 private:
-    AmqpConfig      amqp_cfg_;
-    CollectorConfig col_cfg_;
-    std::string     local_ip_;
-    int             task_rank_ = 1;
-    double          last_sr_   = 0;
+    AmqpConfig               amqp_cfg_;
+    CollectorConfig          col_cfg_;
+    std::string              local_ip_;
+    int                      task_rank_ = 1;
+    au::QuantityD<au::Hertz> last_sr_{au::hertz(0.0)};
 
     /// Persistent AMQP channel — connects once at construction, reused forever.
     std::unique_ptr<IqTaskChannel> ch_;

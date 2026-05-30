@@ -1,12 +1,16 @@
 #pragma once
 /**
  * @file SignalFeatures.hpp
+ * @note Frequency fields use au::QuantityD<au::Hertz>;
+ *       burst_period_ms uses au::QuantityD<au::Seconds>.
  * @brief Feature vector extracted from a block of IQ samples.
  *
  * SignalFeatures is populated by FeatureExtractor::extract() and consumed
  * by ModulationClassifier and ProtocolMapper.  Every field has a zero/false
  * default; FeatureExtractor sets only the fields it can reliably estimate.
  */
+#include <au/units/hertz.hh>
+#include <au/units/seconds.hh>
 #include <cstdint>
 #include <complex>
 #include <vector>
@@ -25,8 +29,8 @@ namespace analysis {
  */
 struct SignalFeatures {
     // ── Spectral ─────────────────────────────────────────────────────────────
-    double center_freq_hz    = 0;  ///< Centre frequency passed in by the caller (Hz).
-    double bandwidth_hz      = 0;  ///< −10 dB occupied bandwidth (Hz).
+    au::QuantityD<au::Hertz> center_freq_hz{au::hertz(0.0)}; ///< Centre frequency passed in by the caller.
+    au::QuantityD<au::Hertz> bandwidth_hz{au::hertz(0.0)};   ///< −10 dB occupied bandwidth.
     double snr_db            = 0;  ///< Signal-to-noise ratio (dB).
     double spectral_flatness = 0;  ///< Wiener entropy: 0 = tonal, 1 = flat/noise-like.
     double spectral_symmetry = 0;  ///< PSD mirror symmetry: 1 = symmetric, 0 = asymmetric.
@@ -35,11 +39,11 @@ struct SignalFeatures {
     double envelope_mean          = 0; ///< Mean of the signal envelope |x(t)|.
     double envelope_std           = 0; ///< Std deviation of the envelope.
     double envelope_variance_norm = 0; ///< var(|x|) / mean(|x|)^2 — amplitude modulation depth.
-    double inst_freq_mean_hz      = 0; ///< Mean instantaneous frequency (Hz).
-    double inst_freq_std_hz       = 0; ///< Std deviation of instantaneous frequency (Hz).
+    au::QuantityD<au::Hertz> inst_freq_mean_hz{au::hertz(0.0)}; ///< Mean instantaneous frequency.
+    au::QuantityD<au::Hertz> inst_freq_std_hz{au::hertz(0.0)};  ///< Std deviation of instantaneous frequency.
     double inst_phase_std         = 0; ///< Std deviation of instantaneous phase (rad).
     double am_index               = 0; ///< Estimated AM modulation index.
-    double fm_deviation_hz        = 0; ///< Estimated FM peak deviation (Hz).
+    au::QuantityD<au::Hertz> fm_deviation_hz{au::hertz(0.0)};   ///< Estimated FM peak deviation.
 
     // ── Higher-order cumulants (normalised by power^2) ───────────────────────
     double c40_real = 0; ///< Re{C40/M21^2} — 4th-order cumulant (real part).
@@ -48,13 +52,13 @@ struct SignalFeatures {
     double c41_real = 0; ///< Re{C41/M21^2} — mixed cumulant (real part).
 
     // ── Symbol / bit rate ────────────────────────────────────────────────────
-    double symbol_rate_sps = 0; ///< Estimated symbol rate (symbols/s; 0 = not found).
+    au::QuantityD<au::Hertz> symbol_rate_sps{au::hertz(0.0)}; ///< Estimated symbol rate (symbols/s; 0 = not found).
     double bit_rate_bps    = 0; ///< Estimated bit rate (bits/s; 0 = not found).
 
     // ── Structural ───────────────────────────────────────────────────────────
     bool   is_burst        = false; ///< True if burst (non-continuous) transmission.
     double burst_duty_cycle= 1.0;   ///< Fraction of time the carrier is active (0–1).
-    double burst_period_ms = 0;     ///< Burst repetition period (ms; 0 = aperiodic).
+    au::QuantityD<au::Seconds> burst_period_ms{au::seconds(0.0)}; ///< Burst repetition period (0 = aperiodic).
     bool   ofdm_detected   = false; ///< True if OFDM cyclic-prefix structure found.
     int    ofdm_fft_size_est = 0;   ///< Estimated OFDM FFT size (0 if not OFDM).
     double ofdm_cp_ratio   = 0;     ///< Cyclic prefix ratio (CP length / FFT size).
@@ -66,7 +70,7 @@ struct SignalFeatures {
 
     // ── Metadata ─────────────────────────────────────────────────────────────
     int    sample_count    = 0;  ///< Number of IQ samples analysed.
-    double sample_rate_sps = 0;  ///< Sample rate of the analysed block (samples/s).
+    au::QuantityD<au::Hertz> sample_rate_sps{au::hertz(0.0)}; ///< Sample rate of the analysed block.
 };
 
 } // namespace analysis

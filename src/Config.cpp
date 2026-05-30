@@ -1,4 +1,6 @@
 #include "Config.hpp"
+#include <au/units/hertz.hh>
+#include <au/units/seconds.hh>
 #include <tinyxml2.h>
 #include <stdexcept>
 #include <spdlog/spdlog.h>
@@ -75,13 +77,17 @@ AppConfig parseConfig(const std::string& xml_path)
     // <collector>
     const auto* col_el = root->FirstChildElement("collector");
     if (col_el) {
-        cfg.collector.analysis_sample_rate_sps =
-            xmlDouble(col_el, "analysis_sample_rate_sps",
-                      cfg.collector.analysis_sample_rate_sps);
+        double sr_raw = cfg.collector.analysis_sample_rate_sps.in(au::hertz);
+        sr_raw = xmlDouble(col_el, "analysis_sample_rate_sps", sr_raw);
+        cfg.collector.analysis_sample_rate_sps = au::hertz(sr_raw);
+
         cfg.collector.collect_samples =
             xmlInt(col_el, "collect_samples", cfg.collector.collect_samples);
-        cfg.collector.analysis_timeout_ms =
-            xmlInt(col_el, "analysis_timeout_ms", cfg.collector.analysis_timeout_ms);
+
+        int timeout_ms_raw = static_cast<int>(
+            cfg.collector.analysis_timeout_ms.in(au::milli(au::seconds)));
+        timeout_ms_raw = xmlInt(col_el, "analysis_timeout_ms", timeout_ms_raw);
+        cfg.collector.analysis_timeout_ms = au::milli(au::seconds)(timeout_ms_raw);
     }
 
     // <engine>

@@ -9,6 +9,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 
+# ── Au (Aurora units library) ─────────────────────────────────────────────────
+include(FetchContent)
+FetchContent_Declare(Au
+    GIT_REPOSITORY https://github.com/aurora-opensource/au.git
+    GIT_TAG        0.5.1
+    GIT_SHALLOW    TRUE)
+FetchContent_MakeAvailable(Au)
+
 # ── SdrSdk (provides sdr_task_api types via its subdirectory) ─────────────────
 # Expected as a sibling directory: ../SdrSdk  (same parent as this repo).
 # SdrSdk itself expects ../SdrTaskApi as its own sibling.
@@ -189,6 +197,7 @@ endif()
 
 target_link_libraries(analysis_lib PUBLIC
     sdr_task_api
+    Au::au
     PkgConfig::FFTW3F
     nlohmann_json::nlohmann_json
     spdlog::spdlog

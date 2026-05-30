@@ -15,6 +15,7 @@
  * Thread-safe: extract() is const; FFTW plans are read-only after construction.
  */
 #include "SignalFeatures.hpp"
+#include <au/units/hertz.hh>
 #include <vector>
 #include <complex>
 
@@ -38,8 +39,8 @@ public:
      * @return Fully populated SignalFeatures.
      */
     SignalFeatures extract(const std::vector<float>& iq,
-                           double sample_rate_sps,
-                           double center_freq_hz) const;
+                           au::QuantityD<au::Hertz> sample_rate_sps,
+                           au::QuantityD<au::Hertz> center_freq_hz) const;
 
 private:
     int fft_size_;
@@ -54,22 +55,22 @@ private:
                           double& c41r, double& c42) const;
 
     double estimateSymbolRate(const std::vector<std::complex<float>>& x,
-                               double sample_rate_sps) const;
+                               au::QuantityD<au::Hertz> sample_rate_sps) const;
 
     bool detectOfdm(const std::vector<std::complex<float>>& x,
-                    double sample_rate_sps,
+                    au::QuantityD<au::Hertz> sample_rate_sps,
                     int& fft_size_out, double& cp_ratio_out) const;
 
     bool detectFhss(const std::vector<std::complex<float>>& x,
-                    double sample_rate_sps,
+                    au::QuantityD<au::Hertz> sample_rate_sps,
                     double& hop_rate_hz_out) const;
 
     bool detectChirp(const std::vector<std::complex<float>>& x,
-                     double sample_rate_sps,
+                     au::QuantityD<au::Hertz> sample_rate_sps,
                      double& chirp_rate_out) const;
 
     void computeInstFreqStats(const std::vector<std::complex<float>>& x,
-                               double sample_rate_sps,
+                               au::QuantityD<au::Hertz> sample_rate_sps,
                                double& mean_hz, double& std_hz) const;
 
     bool detectBurst(const std::vector<std::complex<float>>& x,

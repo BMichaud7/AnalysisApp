@@ -1,4 +1,6 @@
 #include "FeatureExtractor.hpp"
+#include <au/units/hertz.hh>
+#include <au/units/seconds.hh>
 #include <fftw3.h>
 #include <numbers>
 #include <cmath>
@@ -192,8 +194,9 @@ void FeatureExtractor::computeCumulants(const std::vector<cf32>& x,
 // ── Symbol-rate estimation ────────────────────────────────────────────────────
 
 double FeatureExtractor::estimateSymbolRate(const std::vector<cf32>& x,
-                                             double sample_rate_sps) const
+                                             au::QuantityD<au::Hertz> sample_rate_sps) const
 {
+    const double sample_rate = sample_rate_sps.in(au::hertz);
     const int N = fft_size_;
     if (static_cast<int>(x.size()) < N) return 0.0;
 
@@ -234,8 +237,8 @@ double FeatureExtractor::estimateSymbolRate(const std::vector<cf32>& x,
     }
 
     // Convert winning bin to frequency
-    double sr_from_sq = (bin_sq > 0) ? (double)bin_sq * sample_rate_sps / N : 0.0;
-    double sr_from_4  = (bin_4  > 0) ? (double)bin_4  * sample_rate_sps / N / 4.0 : 0.0;
+    double sr_from_sq = (bin_sq > 0) ? (double)bin_sq * sample_rate / N : 0.0;
+    double sr_from_4  = (bin_4  > 0) ? (double)bin_4  * sample_rate / N / 4.0 : 0.0;
 
     // For fourth-power method, the symbol rate = peak_freq / 2 for M-PSK
     // (the squarer gives symbol-rate spurs at symbol_rate * n, fourth-power
@@ -264,7 +267,7 @@ double FeatureExtractor::estimateSymbolRate(const std::vector<cf32>& x,
 // ── OFDM detection (cyclic-prefix correlation) ───────────────────────────────
 
 bool FeatureExtractor::detectOfdm(const std::vector<cf32>& x,
-                                   double /*sample_rate_sps*/,
+                                   au::QuantityD<au::Hertz> /*sample_rate_sps*/,
                                    int& fft_size_out,
                                    double& cp_ratio_out) const
 {
@@ -326,9 +329,10 @@ bool FeatureExtractor::detectOfdm(const std::vector<cf32>& x,
 // ── FHSS detection ────────────────────────────────────────────────────────────
 
 bool FeatureExtractor::detectFhss(const std::vector<cf32>& x,
-                                   double sample_rate_sps,
+                                   au::QuantityD<au::Hertz> sample_rate_sps,
                                    double& hop_rate_hz_out) const
 {
+    const double sr = sample_rate_sps.in(au::hertz);
     const int total = static_cast<int>(x.size());
     const int num_segs = 32;
     const int seg_len  = total / num_segs;
@@ -350,7 +354,7 @@ bool FeatureExtractor::detectFhss(const std::vector<cf32>& x,
 
         double num = 0, den = 0;
         for (int k = 0; k < n; ++k) {
-            double f  = (double)k / n * sample_rate_sps - sample_rate_sps / 2.0;
+            double f  = (double)k / n * sr - sr / 2.0;
             double pw = std::norm(spec[(k + n/2) % n]);
             num += f * pw;
             den += pw;
@@ -366,7 +370,7 @@ bool FeatureExtractor::detectFhss(const std::vector<cf32>& x,
     double std_c = std::sqrt(var_c);
 
     // Bandwidth estimate from signal itself
-    double sig_bw = sample_rate_sps * 0.5; // conservative
+    double sig_bw = sr * 0.5; // conservative
 
     if (std_c > sig_bw / 4.0) {
         // Estimate hop rate from transitions between segments
@@ -375,7 +379,7 @@ bool FeatureExtractor::detectFhss(const std::vector<cf32>& x,
             if (std::abs(centroids[s] - centroids[s-1]) > std_c * 0.5)
                 ++transitions;
 
-        double total_time_s = (double)total / sample_rate_sps;
+        double total_time_s = (double)total / sr;
         hop_rate_hz_out = (double)transitions / total_time_s;
         return true;
     }
@@ -385,9 +389,10 @@ bool FeatureExtractor::detectFhss(const std::vector<cf32>& x,
 // ── Chirp detection ───────────────────────────────────────────────────────────
 
 bool FeatureExtractor::detectChirp(const std::vector<cf32>& x,
-                                    double sample_rate_sps,
+                                    au::QuantityD<au::Hertz> sample_rate_sps,
                                     double& chirp_rate_out) const
 {
+    const double sr = sample_rate_sps.in(au::hertz);
     const int N = std::min(1000, static_cast<int>(x.size()) - 1);
     if (N < 10) return false;
 
@@ -395,7 +400,7 @@ bool FeatureExtractor::detectChirp(const std::vector<cf32>& x,
     std::vector<double> fi(N);
     for (int i = 0; i < N; ++i) {
         cf32 prod = x[i + 1] * std::conj(x[i]);
-        fi[i] = std::arg(prod) * sample_rate_sps / (2.0 * std::numbers::pi_v<double>);
+        fi[i] = std::arg(prod) * sr / (2.0 * std::numbers::pi_v<double>);
     }
 
     // Linear regression on fi vs sample index
@@ -423,9 +428,9 @@ bool FeatureExtractor::detectChirp(const std::vector<cf32>& x,
     double r2 = (ss_tot > 1e-12) ? 1.0 - ss_res / ss_tot : 0.0;
 
     // Slope in Hz/sample → convert to Hz/s
-    double slope_hz_s = slope * sample_rate_sps;
+    double slope_hz_s = slope * sr;
 
-    if (r2 > 0.95 && std::abs(slope_hz_s) > sample_rate_sps / 100.0) {
+    if (r2 > 0.95 && std::abs(slope_hz_s) > sr / 100.0) {
         chirp_rate_out = slope_hz_s;
         return true;
     }

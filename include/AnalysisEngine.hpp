@@ -25,6 +25,7 @@
 #include "ModulationClassifier.hpp"
 #include "ProtocolMapper.hpp"
 #include "OnnxClassifier.hpp"
+#include <au/units/hertz.hh>
 #include <vector>
 #include <string>
 #include <future>
@@ -57,8 +58,8 @@ public:
      * @return AnalysisResult with all five layers populated.
      */
     AnalysisResult analyze(const std::vector<float>& iq_cf32,
-                           double sample_rate_sps,
-                           double center_freq_hz,
+                           au::QuantityD<au::Hertz> sample_rate_sps,
+                           au::QuantityD<au::Hertz> center_freq_hz,
                            const std::string& detection_id,
                            const std::string& scanner_id) const;
 
@@ -76,8 +77,8 @@ public:
      * @return AnalysisResult with onnx_used = true and fast_path = true.
      */
     AnalysisResult analyzeSnapshot(const std::vector<float>& iq_snapshot,
-                                   double sample_rate_sps,
-                                   double center_freq_hz,
+                                   au::QuantityD<au::Hertz> sample_rate_sps,
+                                   au::QuantityD<au::Hertz> center_freq_hz,
                                    const std::string& detection_id,
                                    const std::string& scanner_id) const;
 

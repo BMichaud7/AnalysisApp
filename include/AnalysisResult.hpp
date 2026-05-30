@@ -1,6 +1,8 @@
 #pragma once
 /**
  * @file AnalysisResult.hpp
+ * @note Frequency fields use au::QuantityD<au::Hertz>;
+ *       timestamp_ms uses au::QuantityD<au::Seconds>.
  * @brief Full signal characterisation result from the analysis pipeline.
  *
  * AnalysisResult captures five layers of signal description:
@@ -10,6 +12,8 @@
  * - **Layer 4** — bitstream traits (bit rate, line code, FEC)
  * - **Layer 5** — protocol hypotheses matched against the signature database
  */
+#include <au/units/hertz.hh>
+#include <au/units/seconds.hh>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -39,10 +43,10 @@ struct Hypothesis {
 struct AnalysisResult {
     std::string detection_id;   ///< UUID matching the originating RF_DETECTION message.
     std::string scanner_id;     ///< Scanner that produced the detection.
-    double      center_freq_hz; ///< Centre frequency (Hz).
-    double      bandwidth_hz;   ///< Occupied bandwidth (Hz).
-    double      snr_db;         ///< Signal-to-noise ratio (dB).
-    int64_t     timestamp_ms;   ///< UTC epoch milliseconds of original detection.
+    au::QuantityD<au::Hertz>   center_freq_hz{au::hertz(0.0)}; ///< Centre frequency.
+    au::QuantityD<au::Hertz>   bandwidth_hz{au::hertz(0.0)};   ///< Occupied bandwidth.
+    double      snr_db{0.0};    ///< Signal-to-noise ratio (dB).
+    au::QuantityD<au::Seconds> timestamp_ms{au::seconds(0.0)}; ///< UTC epoch of original detection.
 
     // ── Layer 1: Analog modulation ──────────────────────────────────────────
     /// Analog modulation type: "AM_DSB_LC", "AM_DSB_SC", "SSB_USB", "SSB_LSB",
@@ -53,8 +57,8 @@ struct AnalysisResult {
     // ── Layer 2: Digital carrier ────────────────────────────────────────────
     /// Digital modulation: "BPSK", "QPSK", "8PSK", "QAM16", "QAM64", … or "".
     std::string digital_modulation;
-    double      symbol_rate_sps; ///< Estimated symbol rate (symbols/s).
-    int         m_ary;           ///< Modulation order (e.g. 2 for BPSK, 4 for QPSK).
+    au::QuantityD<au::Hertz> symbol_rate_sps{au::hertz(0.0)}; ///< Estimated symbol rate (symbols/s).
+    int         m_ary{0};        ///< Modulation order (e.g. 2 for BPSK, 4 for QPSK).
     bool        is_ofdm;         ///< True if OFDM subcarrier structure detected.
     bool        is_spread;       ///< True if DSSS or FHSS spreading detected.
 
@@ -62,9 +66,9 @@ struct AnalysisResult {
     bool        is_burst;                    ///< True if burst (non-continuous) transmission.
     double      burst_duty_cycle;            ///< Fraction of time the carrier is on (0–1).
     bool        is_tdma;                     ///< True if time-division multiple access detected.
-    bool        is_fhss;                     ///< True if frequency-hopping spread spectrum.
-    bool        is_dsss;                     ///< True if direct-sequence spread spectrum.
-    double      ofdm_subcarrier_spacing_hz;  ///< OFDM subcarrier spacing (Hz; 0 if not OFDM).
+    bool        is_fhss{false};              ///< True if frequency-hopping spread spectrum.
+    bool        is_dsss{false};              ///< True if direct-sequence spread spectrum.
+    au::QuantityD<au::Hertz> ofdm_subcarrier_spacing_hz{au::hertz(0.0)}; ///< OFDM subcarrier spacing (0 if not OFDM).
 
     // ── Layer 4: Bitstream traits ───────────────────────────────────────────
     double      bit_rate_bps;    ///< Estimated bit rate (bits/s).
