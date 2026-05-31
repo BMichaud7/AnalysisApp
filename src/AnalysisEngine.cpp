@@ -1,4 +1,5 @@
 #include "AnalysisEngine.hpp"
+#include <au/units/seconds.hh>
 #include <chrono>
 #include <spdlog/spdlog.h>
 
@@ -60,8 +61,8 @@ float AnalysisEngine::ruleConfidence(const AnalysisResult& r,
 // ── Main analysis pipeline ─────────────────────────────────────────────────
 
 AnalysisResult AnalysisEngine::analyze(const std::vector<float>& iq_cf32,
-                                        double sample_rate_sps,
-                                        double center_freq_hz,
+                                        au::QuantityD<au::Hertz> sample_rate_sps,
+                                        au::QuantityD<au::Hertz> center_freq_hz,
                                         const std::string& detection_id,
                                         const std::string& scanner_id) const
 {
@@ -71,9 +72,11 @@ AnalysisResult AnalysisEngine::analyze(const std::vector<float>& iq_cf32,
     result.detection_id   = detection_id;
     result.scanner_id     = scanner_id;
     result.center_freq_hz = center_freq_hz;
-    result.timestamp_ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::system_clock::now().time_since_epoch())
-                                .count();
+    result.timestamp_ms   = au::milli(au::seconds)(
+                                static_cast<double>(
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::system_clock::now().time_since_epoch())
+                                        .count()));
 
     if (iq_cf32.empty()) {
         result.classified    = false;
@@ -134,7 +137,7 @@ AnalysisResult AnalysisEngine::analyze(const std::vector<float>& iq_cf32,
 
     spdlog::info("AnalysisEngine: [{:.3f} MHz] SNR={:.1f}dB mod={} "
                  "rule={:.0f}%{} hyp='{}' [{} ms]",
-                 center_freq_hz / 1e6,
+                 center_freq_hz.in(au::mega(au::hertz)),
                  result.snr_db,
                  mod.empty() ? "UNCLASSIFIED" : mod,
                  result.rule_confidence * 100.f,
@@ -150,8 +153,8 @@ AnalysisResult AnalysisEngine::analyze(const std::vector<float>& iq_cf32,
 // that arrived inside the RF_DETECTION AMQP message.
 AnalysisResult AnalysisEngine::analyzeSnapshot(
     const std::vector<float>& iq_snapshot,
-    double sample_rate_sps,
-    double center_freq_hz,
+    au::QuantityD<au::Hertz> sample_rate_sps,
+    au::QuantityD<au::Hertz> center_freq_hz,
     const std::string& detection_id,
     const std::string& scanner_id) const
 {
@@ -159,9 +162,11 @@ AnalysisResult AnalysisEngine::analyzeSnapshot(
     result.detection_id   = detection_id;
     result.scanner_id     = scanner_id;
     result.center_freq_hz = center_freq_hz;
-    result.timestamp_ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::system_clock::now().time_since_epoch())
-                                .count();
+    result.timestamp_ms   = au::milli(au::seconds)(
+                                static_cast<double>(
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::system_clock::now().time_since_epoch())
+                                        .count()));
 
     if (iq_snapshot.empty() || !onnx_.loaded()) {
         result.classified    = false;
@@ -183,7 +188,7 @@ AnalysisResult AnalysisEngine::analyzeSnapshot(
         mapper_.map(minimal, result);
 
         spdlog::debug("AnalysisEngine::analyzeSnapshot: {:.3f} MHz → {} ({:.0f}%)",
-                      center_freq_hz / 1e6,
+                      center_freq_hz.in(au::mega(au::hertz)),
                       onnx_res.modulation, onnx_res.confidence * 100.f);
     } else {
         result.classified    = false;

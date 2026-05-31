@@ -1,4 +1,6 @@
 #include "ModulationClassifier.hpp"
+#include <au/units/hertz.hh>
+#include <au/units/seconds.hh>
 #include <cmath>
 #include <spdlog/spdlog.h>
 
@@ -34,8 +36,8 @@ std::string ModulationClassifier::classifyAnalog(const SignalFeatures& f,
 {
     // FM family: constant envelope + large deviation
     if (f.fm_deviation_hz > f.bandwidth_hz * 0.1 && f.envelope_variance_norm < 0.1) {
-        index_out = f.fm_deviation_hz;
-        if (f.fm_deviation_hz > 50000.0) return "FM_WB";
+        index_out = f.fm_deviation_hz.in(au::hertz);
+        if (f.fm_deviation_hz > au::hertz(50000.0)) return "FM_WB";
         return "FM_NB";
     }
 
@@ -53,7 +55,7 @@ std::string ModulationClassifier::classifyAnalog(const SignalFeatures& f,
     // SSB: asymmetric spectrum
     if (f.am_index > 0.1 && f.spectral_symmetry < 0.5) {
         // Determine USB vs LSB from inst frequency centroid direction
-        if (f.inst_freq_mean_hz > 0) return "SSB_USB";
+        if (f.inst_freq_mean_hz.in(au::hertz) > 0) return "SSB_USB";
         return "SSB_LSB";
     }
 
@@ -177,8 +179,8 @@ void ModulationClassifier::classify(const SignalFeatures& f,
     r.burst_duty_cycle   = f.burst_duty_cycle;
     r.is_fhss            = f.fhss_detected;
     r.is_dsss            = f.dsss_detected;
-    r.is_tdma            = f.is_burst && (f.burst_period_ms > 0);
-    r.ofdm_subcarrier_spacing_hz = 0.0;
+    r.is_tdma            = f.is_burst && (f.burst_period_ms.in(au::seconds) > 0);
+    r.ofdm_subcarrier_spacing_hz = au::hertz(0.0);
 
     // Layer 4 defaults
     r.bit_rate_bps    = 0;
@@ -218,7 +220,7 @@ void ModulationClassifier::classify(const SignalFeatures& f,
             r.symbol_rate_sps = f.sample_rate_sps / f.ofdm_fft_size_est;
         r.ofdm_subcarrier_spacing_hz = (f.ofdm_fft_size_est > 0)
                                        ? f.sample_rate_sps / f.ofdm_fft_size_est
-                                       : 0.0;
+                                       : au::hertz(0.0);
         spdlog::debug("Classifier: OFDM Nfft={}", f.ofdm_fft_size_est);
         return;
     }
@@ -257,8 +259,10 @@ void ModulationClassifier::classify(const SignalFeatures& f,
     // Line code heuristic for FSK
     if (r.digital_modulation == "FSK" || r.digital_modulation == "GMSK") {
         // Manchester encoding doubles the bandwidth relative to symbol rate
-        if (f.bandwidth_hz > 0 && f.symbol_rate_sps > 0) {
-            double ratio = f.bandwidth_hz / f.symbol_rate_sps;
+        const double bw_hz = f.bandwidth_hz.in(au::hertz);
+        const double sr_hz = f.symbol_rate_sps.in(au::hertz);
+        if (bw_hz > 0 && sr_hz > 0) {
+            double ratio = bw_hz / sr_hz;
             if (ratio > 1.8 && ratio < 2.5)
                 r.line_code = "Manchester";
         }
@@ -266,14 +270,14 @@ void ModulationClassifier::classify(const SignalFeatures& f,
     }
 
     // ── Step 8/9: Bitstream traits ────────────────────────────────────────
-    if (r.m_ary > 1 && r.symbol_rate_sps > 0) {
+    if (r.m_ary > 1 && r.symbol_rate_sps.in(au::hertz) > 0) {
         double bits_per_sym = std::log2(r.m_ary);
-        r.bit_rate_bps = r.symbol_rate_sps * bits_per_sym;
+        r.bit_rate_bps = r.symbol_rate_sps.in(au::hertz) * bits_per_sym;
     }
 
     spdlog::debug("Classifier: digital → {} m_ary={} sr={:.0f} sps bit_rate={:.0f} bps",
                   r.digital_modulation, r.m_ary,
-                  r.symbol_rate_sps, r.bit_rate_bps);
+                  r.symbol_rate_sps.in(au::hertz), r.bit_rate_bps);
 }
 
 } // namespace analysis

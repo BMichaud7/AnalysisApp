@@ -1,4 +1,5 @@
 #include "ProtocolMapper.hpp"
+#include <au/units/hertz.hh>
 #include <algorithm>
 #include <cmath>
 #include <spdlog/spdlog.h>
@@ -11,7 +12,7 @@ double ProtocolMapper::Signature::score(const SignalFeatures& f,
                                          const AnalysisResult& r) const
 {
     double freq_match = 1.0;
-    double cf_mhz = f.center_freq_hz / 1e6;
+    const double cf_mhz = f.center_freq_hz.in(au::mega(au::hertz));
 
     if (!freq_bands_mhz.empty()) {
         bool in_band = false;
@@ -48,13 +49,14 @@ double ProtocolMapper::Signature::score(const SignalFeatures& f,
     // Bandwidth match: Gaussian-like score
     double bw_match = 1.0;
     if (bw_min_hz > 0 || bw_max_hz > 0) {
-        if (f.bandwidth_hz < bw_min_hz * 0.5 || f.bandwidth_hz > bw_max_hz * 2.0) {
+        const double bw_hz = f.bandwidth_hz.in(au::hertz);
+        if (bw_hz < bw_min_hz * 0.5 || bw_hz > bw_max_hz * 2.0) {
             bw_match = 0.0;
         } else {
             double bw_mid = (bw_min_hz + bw_max_hz) / 2.0;
             double bw_range = bw_max_hz - bw_min_hz;
             double sigma = bw_range > 0 ? bw_range : bw_mid * 0.3;
-            double d = f.bandwidth_hz - bw_mid;
+            double d = bw_hz - bw_mid;
             bw_match = std::exp(-0.5 * (d / sigma) * (d / sigma));
         }
     }
@@ -62,16 +64,16 @@ double ProtocolMapper::Signature::score(const SignalFeatures& f,
     // Symbol rate match
     double sr_match = 1.0;
     if (sr_min_sps > 0 || sr_max_sps > 0) {
-        if (r.symbol_rate_sps <= 0) {
+        const double sr_hz = r.symbol_rate_sps.in(au::hertz);
+        if (sr_hz <= 0) {
             sr_match = 0.3;  // unknown → slight penalty
-        } else if (r.symbol_rate_sps < sr_min_sps * 0.5 ||
-                   r.symbol_rate_sps > sr_max_sps * 2.0) {
+        } else if (sr_hz < sr_min_sps * 0.5 || sr_hz > sr_max_sps * 2.0) {
             sr_match = 0.0;
         } else {
             double sr_mid   = (sr_min_sps + sr_max_sps) / 2.0;
             double sr_range = sr_max_sps - sr_min_sps;
             double sigma    = sr_range > 0 ? sr_range : sr_mid * 0.3;
-            double d        = r.symbol_rate_sps - sr_mid;
+            double d        = sr_hz - sr_mid;
             sr_match = std::exp(-0.5 * (d / sigma) * (d / sigma));
         }
     }
@@ -452,10 +454,10 @@ void ProtocolMapper::map(const SignalFeatures& f, AnalysisResult& r) const
             reason += r.digital_modulation;
         else if (!r.analog_modulation.empty())
             reason += r.analog_modulation;
-        if (r.symbol_rate_sps > 0)
-            reason += " " + std::to_string((int)r.symbol_rate_sps) + " baud";
-        if (f.center_freq_hz > 0)
-            reason += " at " + std::to_string((int)(f.center_freq_hz / 1e6)) + " MHz";
+        if (r.symbol_rate_sps.in(au::hertz) > 0)
+            reason += " " + std::to_string((int)r.symbol_rate_sps.in(au::hertz)) + " baud";
+        if (f.center_freq_hz.in(au::hertz) > 0)
+            reason += " at " + std::to_string((int)f.center_freq_hz.in(au::mega(au::hertz))) + " MHz";
         if (f.is_burst)
             reason += ", TDMA burst";
         reason += " (score=" + std::to_string((int)(sc * 100)) + "%)";

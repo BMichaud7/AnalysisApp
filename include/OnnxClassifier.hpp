@@ -22,6 +22,7 @@
  * loaded() returns false and classify() returns an invalid OnnxResult.
  */
 #include "AnalysisResult.hpp"
+#include <au/units/hertz.hh>
 #include <string>
 #include <vector>
 #include <memory>
@@ -80,7 +81,7 @@ public:
      * @return OnnxResult with valid = true on success.
      */
     OnnxResult classify(const std::vector<float>& iq_cf32,
-                        double sample_rate_sps) const;
+                        au::QuantityD<au::Hertz> sample_rate_sps) const;
 
     /**
      * @brief Batch classify multiple signals in one GPU launch.
@@ -94,7 +95,7 @@ public:
      */
     std::vector<OnnxResult> classifyBatch(
         const std::vector<std::vector<float>>& signals,
-        double sample_rate_sps) const;
+        au::QuantityD<au::Hertz> sample_rate_sps) const;
 
     /// @brief Class label names in softmax output order.
     const std::vector<std::string>& classNames() const { return class_names_; }

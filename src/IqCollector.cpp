@@ -1,5 +1,6 @@
 #include "IqCollector.hpp"
 #include <sdr/Types.hpp>
+#include <au/units/seconds.hh>
 
 #include <proton/container.hpp>
 #include <proton/message.hpp>
@@ -322,15 +323,15 @@ IqCollector::IqCollector(const AmqpConfig& amqp_cfg,
 
 IqCollector::~IqCollector() = default;
 
-std::vector<float> IqCollector::collect(double center_freq_hz,
-                                         double bandwidth_hz,
+std::vector<float> IqCollector::collect(au::QuantityD<au::Hertz> center_freq_hz,
+                                         au::QuantityD<au::Hertz> bandwidth_hz,
                                          const std::string& request_id)
 {
     // Serialize: only one NARROWBAND task at a time (SDR is an exclusive resource).
     std::lock_guard<std::mutex> collect_guard(collect_mu_);
 
-    double  bw     = std::max(bandwidth_hz, 25000.0);
-    double  sr     = col_cfg_.analysis_sample_rate_sps;
+    const double bw = std::max(bandwidth_hz.in(au::hertz), 25000.0);
+    const double sr = col_cfg_.analysis_sample_rate_sps.in(au::hertz);
     int64_t dur_ms = static_cast<int64_t>((double)col_cfg_.collect_samples / sr * 1000.0) + 500;
 
     // Pre-bind UDP socket before submitting the task — controller streams
@@ -349,14 +350,15 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
 
     // Step 1: submit NARROWBAND task via persistent channel.
     std::string req_json = buildTaskRequestJson(
-        request_id, center_freq_hz, bw, sr, dur_ms,
+        request_id, center_freq_hz.in(au::hertz), bw, sr, dur_ms,
         local_ip_, task_rank_, prebound_port);
 
     spdlog::info("IqCollector: submitting NARROWBAND {:.3f} MHz req={}",
-                 center_freq_hz / 1e6, request_id);
+                 center_freq_hz.in(au::mega(au::hertz)), request_id);
 
-    std::string resp_body = ch_->exchange(req_json, request_id,
-                                           col_cfg_.analysis_timeout_ms);
+    const int timeout_ms = static_cast<int>(
+        col_cfg_.analysis_timeout_ms.in(au::milli(au::seconds)));
+    std::string resp_body = ch_->exchange(req_json, request_id, timeout_ms);
     if (resp_body.empty()) {
         spdlog::error("IqCollector: no response for req={}", request_id);
         closePreboundFd();
@@ -377,9 +379,9 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
         accepted_task_id = j.value("task_id", "");
         if (j.contains("streams") && !j["streams"].empty()) {
             udp_port = j["streams"][0].value("udp_port", 0);
-            last_sr_ = j["streams"][0].value("sample_rate_sps", sr);
+            last_sr_ = au::hertz(j["streams"][0].value("sample_rate_sps", sr));
         } else {
-            last_sr_ = sr;
+            last_sr_ = au::hertz(sr);
         }
         if (udp_port == 0) {
             spdlog::error("IqCollector: ACCEPTED missing streams[0].udp_port");
@@ -387,7 +389,7 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
             return {};
         }
         spdlog::debug("IqCollector: accepted task_id={} port={} sr={:.0f}",
-                      accepted_task_id, udp_port, last_sr_);
+                      accepted_task_id, udp_port, last_sr_.in(au::hertz));
     } catch (const std::exception& ex) {
         spdlog::error("IqCollector: parse error: {}", ex.what());
         closePreboundFd();
@@ -409,11 +411,10 @@ std::vector<float> IqCollector::collect(double center_freq_hz,
     }
 
     // Step 4: receive IQ.
-    auto iq = receiveIq(udp_fd, col_cfg_.collect_samples,
-                         col_cfg_.analysis_timeout_ms);
+    auto iq = receiveIq(udp_fd, col_cfg_.collect_samples, timeout_ms);
     ::close(udp_fd);
     spdlog::info("IqCollector: collected {} samples (sr={:.0f} Hz)",
-                 (int)iq.size() / 2, last_sr_);
+                 (int)iq.size() / 2, last_sr_.in(au::hertz));
 
     // Step 5: fire-and-forget TASK_STOP.
     if (!accepted_task_id.empty())

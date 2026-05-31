@@ -373,7 +373,7 @@ void AnalysisService::processDetection(const Detection& d)
         au::QuantityD<au::Hertz> snap_sr =
             d.snapshot_sample_rate_sps.in(au::hertz) > 0
                 ? d.snapshot_sample_rate_sps
-                : au::hertz(cfg_.collector.analysis_sample_rate_sps);
+                : cfg_.collector.analysis_sample_rate_sps;
         AnalysisResult fast = engine_.analyzeSnapshot(
             d.iq_snapshot, snap_sr, d.center_freq_hz, req_id, cfg_.scanner_id);
         fast.timestamp_ms = d.timestamp_ms;
@@ -404,7 +404,7 @@ void AnalysisService::processDetection(const Detection& d)
 
     au::QuantityD<au::Hertz> sr = collector_.lastSampleRate();
     if (sr.in(au::hertz) <= 0)
-        sr = au::hertz(cfg_.collector.analysis_sample_rate_sps);
+        sr = cfg_.collector.analysis_sample_rate_sps;
 
     AnalysisResult result = engine_.analyze(iq, sr, d.center_freq_hz,
                                              req_id, cfg_.scanner_id);

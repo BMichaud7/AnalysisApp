@@ -1,5 +1,6 @@
 #include "OnnxClassifier.hpp"
 
+#include <au/units/hertz.hh>
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 
@@ -112,7 +113,7 @@ OnnxClassifier::OnnxClassifier(const OnnxConfig& cfg)
 OnnxClassifier::~OnnxClassifier() = default;
 
 OnnxResult OnnxClassifier::classify(const std::vector<float>& iq_cf32,
-                                     double /*sample_rate_sps*/) const
+                                     au::QuantityD<au::Hertz> /*sample_rate_sps*/) const
 {
     OnnxResult out;
     if (!loaded_) return out;
@@ -176,7 +177,7 @@ OnnxResult OnnxClassifier::classify(const std::vector<float>& iq_cf32,
 // More efficient than calling classify() N times when the backlog is large.
 std::vector<OnnxResult> OnnxClassifier::classifyBatch(
     const std::vector<std::vector<float>>& signals,
-    double sample_rate_sps) const
+    au::QuantityD<au::Hertz> /*sample_rate_sps*/) const
 {
     std::vector<OnnxResult> results(signals.size());
     if (!loaded_ || signals.empty()) return results;
