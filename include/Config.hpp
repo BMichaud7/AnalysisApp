@@ -14,8 +14,8 @@
  * - OnnxConfig (in OnnxClassifier.hpp) — model path and GPU settings
  */
 #include "OnnxClassifier.hpp"
+#include <au/units/hertz.hh>
 #include <au/units/seconds.hh>
-
 #include <au/prefix.hh>
 #include <cstdint>
 

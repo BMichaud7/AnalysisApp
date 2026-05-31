@@ -1,7 +1,7 @@
 #include "Config.hpp"
 #include <au/units/seconds.hh>
-
 #include <au/prefix.hh>
+#include <tinyxml2.h>
 #include <stdexcept>
 #include <spdlog/spdlog.h>
 
@@ -150,5 +150,3 @@ AppConfig parseConfig(const std::string& xml_path)
 
     return cfg;
 }
-
-#include <tinyxml2.h>
