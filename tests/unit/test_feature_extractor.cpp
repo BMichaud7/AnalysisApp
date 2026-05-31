@@ -1,3 +1,4 @@
+#include <au/units/hertz.hh>
 #include <gtest/gtest.h>
 #include "FeatureExtractor.hpp"
 #include <cmath>
@@ -183,7 +184,7 @@ TEST_F(FeatureExtractorTest, BpskCumulants)
     double symbol_rate = 50000.0;  // 50 ksps
     auto iq = genBpsk(symbol_rate);
 
-    auto f = extractor_.extract(iq, SR, 0.0);
+    auto f = extractor_.extract(iq, au::hertz(SR), au::hertz(0.0));
 
     // BPSK theoretical (real signal s=±1):
     //   c40 = E[s⁴] - 3(E[s²])² = 1 - 3 = -2
@@ -194,8 +195,8 @@ TEST_F(FeatureExtractorTest, BpskCumulants)
         << "c42 for BPSK should be near -2 (real signal)";
 
     // Symbol rate detection
-    if (f.symbol_rate_sps > 0) {
-        EXPECT_NEAR(f.symbol_rate_sps, symbol_rate, symbol_rate * 0.3)
+    if (f.symbol_rate_sps.in(au::hertz) > 0) {
+        EXPECT_NEAR(f.symbol_rate_sps.in(au::hertz), symbol_rate, symbol_rate * 0.3)
             << "Symbol rate estimate should be near " << symbol_rate;
     }
 
@@ -212,16 +213,16 @@ TEST_F(FeatureExtractorTest, FmDeviation)
     double fm_freq   = 1000.0;    // 1 kHz message
     auto iq = genFm(deviation, fm_freq);
 
-    auto f = extractor_.extract(iq, SR, 100e6);
+    auto f = extractor_.extract(iq, au::hertz(SR), au::hertz(100e6));
 
     // FM: envelope should be constant (unit circle)
     EXPECT_LT(f.envelope_variance_norm, 0.05)
         << "FM has constant envelope, variance should be < 0.05";
 
     // FM deviation estimate from instantaneous frequency std
-    EXPECT_GT(f.fm_deviation_hz, deviation * 0.4)
+    EXPECT_GT(f.fm_deviation_hz.in(au::hertz), deviation * 0.4)
         << "FM deviation estimate too low";
-    EXPECT_LT(f.fm_deviation_hz, deviation * 2.0)
+    EXPECT_LT(f.fm_deviation_hz.in(au::hertz), deviation * 2.0)
         << "FM deviation estimate too high";
 }
 
@@ -234,7 +235,7 @@ TEST_F(FeatureExtractorTest, AmDsbLc)
     double fm = 1000.0;    // 1 kHz message
     auto iq = genAmDsbLc(mod_index, fc, fm);
 
-    auto f = extractor_.extract(iq, SR, 1e6);
+    auto f = extractor_.extract(iq, au::hertz(SR), au::hertz(1e6));
 
     // AM-DSB-LC: envelope varies, high envelope_variance_norm
     EXPECT_GT(f.envelope_variance_norm, 0.1)
@@ -255,7 +256,7 @@ TEST_F(FeatureExtractorTest, OfdmDetected)
     int n_symbols = N / (Nfft + Ncp) + 1;
     auto iq = genOfdm(Nfft, Ncp, n_symbols);
 
-    auto f = extractor_.extract(iq, SR, 0.0);
+    auto f = extractor_.extract(iq, au::hertz(SR), au::hertz(0.0));
 
     EXPECT_TRUE(f.ofdm_detected)
         << "OFDM should be detected for Nfft=" << Nfft << " Ncp=" << Ncp;
@@ -273,7 +274,7 @@ TEST_F(FeatureExtractorTest, OokBurstDetection)
 {
     auto iq = genOok(100000.0);  // 100 kHz tone, first half ON, second half OFF
 
-    auto f = extractor_.extract(iq, SR, 0.0);
+    auto f = extractor_.extract(iq, au::hertz(SR), au::hertz(0.0));
 
     EXPECT_TRUE(f.is_burst)
         << "OOK should be detected as burst";
@@ -289,7 +290,7 @@ TEST_F(FeatureExtractorTest, ChirpDetected)
     double chirp_rate = 400000.0 / ((double)N / SR);   // Hz/s
     auto iq = genChirp(-200000.0, chirp_rate);
 
-    auto f = extractor_.extract(iq, SR, 0.0);
+    auto f = extractor_.extract(iq, au::hertz(SR), au::hertz(0.0));
 
     EXPECT_TRUE(f.chirp_detected)
         << "Linear chirp should be detected";
@@ -304,11 +305,11 @@ TEST_F(FeatureExtractorTest, ChirpDetected)
 TEST_F(FeatureExtractorTest, SnrIsPositiveForCleanTone)
 {
     auto iq = genTone(100000.0);
-    auto f = extractor_.extract(iq, SR, 0.0);
+    auto f = extractor_.extract(iq, au::hertz(SR), au::hertz(0.0));
 
     EXPECT_GT(f.snr_db, 10.0)
         << "Clean tone should have SNR > 10 dB";
-    EXPECT_GT(f.bandwidth_hz, 0.0)
+    EXPECT_GT(f.bandwidth_hz.in(au::hertz), 0.0)
         << "Bandwidth should be positive";
 }
 
@@ -317,9 +318,9 @@ TEST_F(FeatureExtractorTest, SnrIsPositiveForCleanTone)
 TEST_F(FeatureExtractorTest, SampleCountMatchesInput)
 {
     auto iq = genTone(50000.0, N);
-    auto f = extractor_.extract(iq, SR, 0.0);
+    auto f = extractor_.extract(iq, au::hertz(SR), au::hertz(0.0));
     EXPECT_EQ(f.sample_count, N);
-    EXPECT_DOUBLE_EQ(f.sample_rate_sps, SR);
+    EXPECT_DOUBLE_EQ(f.sample_rate_sps.in(au::hertz), SR);
 }
 
 // ── Empty input guard ─────────────────────────────────────────────────────────
@@ -327,7 +328,7 @@ TEST_F(FeatureExtractorTest, SampleCountMatchesInput)
 TEST_F(FeatureExtractorTest, EmptyInputReturnsZeroFeatures)
 {
     std::vector<float> empty;
-    auto f = extractor_.extract(empty, SR, 0.0);
+    auto f = extractor_.extract(empty, au::hertz(SR), au::hertz(0.0));
     EXPECT_EQ(f.sample_count, 0);
     EXPECT_DOUBLE_EQ(f.snr_db, 0.0);
 }

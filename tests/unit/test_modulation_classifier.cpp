@@ -1,3 +1,5 @@
+#include <au/units/seconds.hh>
+#include <au/units/hertz.hh>
 #include <gtest/gtest.h>
 #include "ModulationClassifier.hpp"
 #include "SignalFeatures.hpp"
@@ -10,9 +12,9 @@ analysis::SignalFeatures makeFeatures()
 {
     analysis::SignalFeatures f;
     f.snr_db             = 25.0;
-    f.center_freq_hz     = 100e6;
-    f.bandwidth_hz       = 200e3;
-    f.sample_rate_sps    = 2e6;
+    f.center_freq_hz = au::hertz(100e6);
+    f.bandwidth_hz = au::hertz(200e3);
+    f.sample_rate_sps = au::hertz(2e6);
     f.sample_count       = 100000;
     f.envelope_mean      = 1.0;
     f.burst_duty_cycle   = 1.0;
@@ -52,8 +54,8 @@ TEST_F(ModulationClassifierTest, BpskClassification)
     f.c40_real               = -2.0;
     f.c40_imag               = 0.0;
     f.c42                    = -2.0;     // real signal: c42 = E[|s|⁴]-|E[s²]|²-2E[|s|²]² = -2
-    f.symbol_rate_sps        = 50000.0;
-    f.fm_deviation_hz        = 1000.0;   // low
+    f.symbol_rate_sps = au::hertz(50000.0);
+    f.fm_deviation_hz = au::hertz(1000.0);   // low
 
     analysis::AnalysisResult r{};
     clf.classify(f, r);
@@ -75,8 +77,8 @@ TEST_F(ModulationClassifierTest, QpskClassification)
     f.c40_real               = -2.0;
     f.c40_imag               = 0.0;
     f.c42                    = -1.0;     // complex signal: c42 ≈ -1
-    f.symbol_rate_sps        = 100000.0;
-    f.fm_deviation_hz        = 1000.0;
+    f.symbol_rate_sps = au::hertz(100000.0);
+    f.fm_deviation_hz = au::hertz(1000.0);
 
     analysis::AnalysisResult r{};
     clf.classify(f, r);
@@ -91,10 +93,10 @@ TEST_F(ModulationClassifierTest, QpskClassification)
 TEST_F(ModulationClassifierTest, FmNbClassification)
 {
     auto f = makeFeatures();
-    f.bandwidth_hz           = 25000.0;
+    f.bandwidth_hz = au::hertz(25000.0);
     f.envelope_variance_norm = 0.01;    // constant envelope
-    f.fm_deviation_hz        = 5000.0;  // 5 kHz deviation → FM_NB
-    f.inst_freq_std_hz       = 5000.0;
+    f.fm_deviation_hz = au::hertz(5000.0);  // 5 kHz deviation → FM_NB
+    f.inst_freq_std_hz = au::hertz(5000.0);
 
     analysis::AnalysisResult r{};
     clf.classify(f, r);
@@ -108,10 +110,10 @@ TEST_F(ModulationClassifierTest, FmNbClassification)
 TEST_F(ModulationClassifierTest, FmWbClassification)
 {
     auto f = makeFeatures();
-    f.bandwidth_hz           = 200000.0;
+    f.bandwidth_hz = au::hertz(200000.0);
     f.envelope_variance_norm = 0.01;
-    f.fm_deviation_hz        = 75000.0;
-    f.inst_freq_std_hz       = 75000.0;
+    f.fm_deviation_hz = au::hertz(75000.0);
+    f.inst_freq_std_hz = au::hertz(75000.0);
 
     analysis::AnalysisResult r{};
     clf.classify(f, r);
@@ -142,10 +144,10 @@ TEST_F(ModulationClassifierTest, OfdmClassification)
 TEST_F(ModulationClassifierTest, AmDsbLcClassification)
 {
     auto f = makeFeatures();
-    f.bandwidth_hz           = 10000.0;
+    f.bandwidth_hz = au::hertz(10000.0);
     f.envelope_variance_norm = 0.35;
     f.am_index               = 0.7;
-    f.fm_deviation_hz        = 500.0;    // low deviation
+    f.fm_deviation_hz = au::hertz(500.0);    // low deviation
     f.spectral_symmetry      = 0.9;      // symmetric
     f.is_burst               = false;
     f.spectral_flatness      = 0.1;
@@ -180,8 +182,8 @@ TEST_F(ModulationClassifierTest, Qam16Classification)
     f.envelope_variance_norm = 0.15;    // variable amplitude
     f.c40_real               = -0.68;
     f.c42                    = -0.68;
-    f.symbol_rate_sps        = 10e6;
-    f.fm_deviation_hz        = 100.0;
+    f.symbol_rate_sps = au::hertz(10e6);
+    f.fm_deviation_hz = au::hertz(100.0);
 
     analysis::AnalysisResult r{};
     clf.classify(f, r);
@@ -200,8 +202,8 @@ TEST_F(ModulationClassifierTest, BitRateFromSymbolRate)
     f.spectral_flatness      = 0.55;     // wideband — rules out GMSK (< 0.2)
     f.c40_real               = -2.0;
     f.c42                    = -1.0;     // QPSK: c42 ≈ -1
-    f.symbol_rate_sps        = 9600.0;
-    f.fm_deviation_hz        = 100.0;
+    f.symbol_rate_sps = au::hertz(9600.0);
+    f.fm_deviation_hz = au::hertz(100.0);
 
     analysis::AnalysisResult r{};
     clf.classify(f, r);

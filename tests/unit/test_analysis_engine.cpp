@@ -1,3 +1,5 @@
+#include <au/units/seconds.hh>
+#include <au/units/hertz.hh>
 #include <gtest/gtest.h>
 #include "AnalysisEngine.hpp"
 #include "Config.hpp"
@@ -43,7 +45,7 @@ TEST(AnalysisEngine, OnnxLoaded_FalseWhenNoModel) {
 TEST(AnalysisEngine, AnalyzeSnapshot_EmptyIq_ReturnsUnclassified) {
     AnalysisEngine engine(makeEngineConfig());
     std::vector<float> empty;
-    auto result = engine.analyzeSnapshot(empty, 20e6, 433e6, "test-id", "test-scanner");
+    auto result = engine.analyzeSnapshot(empty, au::hertz(20e6), au::hertz(433e6), "test-id", "test-scanner");
 
     EXPECT_FALSE(result.classified)
         << "analyzeSnapshot with empty IQ must return classified=false";
@@ -56,7 +58,7 @@ TEST(AnalysisEngine, AnalyzeSnapshot_EmptyIq_ReturnsUnclassified) {
 TEST(AnalysisEngine, AnalyzeSnapshot_NoOnnx_ReturnsUnclassified) {
     AnalysisEngine engine(makeEngineConfig());
     auto iq = makeToneIq();
-    auto result = engine.analyzeSnapshot(iq, 20e6, 915e6, "test-id", "test-scanner");
+    auto result = engine.analyzeSnapshot(iq, au::hertz(20e6), au::hertz(915e6), "test-id", "test-scanner");
 
     EXPECT_FALSE(result.classified)
         << "analyzeSnapshot without an ONNX model must return classified=false";
@@ -68,12 +70,12 @@ TEST(AnalysisEngine, AnalyzeSnapshot_PopulatesMetadata) {
     AnalysisEngine engine(makeEngineConfig());
     auto iq = makeToneIq();
     const double cf = 915e6;
-    auto result = engine.analyzeSnapshot(iq, 20e6, cf, "req-abc", "scanner-0");
+    auto result = engine.analyzeSnapshot(iq, au::hertz(20e6), au::hertz(cf), "req-abc", "scanner-0");
 
     EXPECT_EQ(result.detection_id, "req-abc");
     EXPECT_EQ(result.scanner_id,   "scanner-0");
-    EXPECT_NEAR(result.center_freq_hz, cf, 1.0);
-    EXPECT_GT(result.timestamp_ms, 0LL)
+    EXPECT_NEAR(result.center_freq_hz.in(au::hertz), cf, 1.0);
+    EXPECT_GT(result.timestamp_ms.in(au::seconds), 0.0)
         << "timestamp_ms must be set even for unclassified results";
 }
 
@@ -82,8 +84,8 @@ TEST(AnalysisEngine, AnalyzeSnapshot_PopulatesMetadata) {
 TEST(AnalysisEngine, AnalyzeSnapshot_TwiceIsIdempotent) {
     AnalysisEngine engine(makeEngineConfig());
     auto iq = makeToneIq();
-    auto r1 = engine.analyzeSnapshot(iq, 20e6, 100e6, "id1", "s");
-    auto r2 = engine.analyzeSnapshot(iq, 20e6, 100e6, "id2", "s");
+    auto r1 = engine.analyzeSnapshot(iq, au::hertz(20e6), au::hertz(100e6), "id1", "s");
+    auto r2 = engine.analyzeSnapshot(iq, au::hertz(20e6), au::hertz(100e6), "id2", "s");
 
     // With no ONNX both results must be consistently unclassified
     EXPECT_EQ(r1.classified, r2.classified);
@@ -97,6 +99,6 @@ TEST(AnalysisEngine, FullAnalyze_ZeroInput_StillRuns) {
     // All-zero IQ → very low SNR → should not crash regardless of result
     std::vector<float> zeros(65536 * 2, 0.f);
     EXPECT_NO_THROW({
-        engine.analyze(zeros, 2e6, 100e6, "id", "scanner");
+        engine.analyze(zeros, au::hertz(2e6), au::hertz(100e6), "id", "scanner");
     });
 }

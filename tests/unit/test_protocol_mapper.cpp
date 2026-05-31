@@ -1,3 +1,6 @@
+#include <au/prefix.hh>
+#include <au/units/seconds.hh>
+#include <au/units/hertz.hh>
 #include <gtest/gtest.h>
 #include "ProtocolMapper.hpp"
 #include "SignalFeatures.hpp"
@@ -8,15 +11,15 @@ namespace {
 analysis::SignalFeatures makeAisFeatures()
 {
     analysis::SignalFeatures f;
-    f.center_freq_hz     = 162.025e6;   // AIS channel 2
-    f.bandwidth_hz       = 25000.0;
+    f.center_freq_hz = au::hertz(162.025e6);   // AIS channel 2
+    f.bandwidth_hz = au::hertz(25000.0);
     f.snr_db             = 22.0;
-    f.sample_rate_sps    = 2e6;
+    f.sample_rate_sps = au::hertz(2e6);
     f.sample_count       = 200000;
     f.envelope_variance_norm = 0.01;    // constant envelope (GMSK)
     f.is_burst           = true;
     f.burst_duty_cycle   = 0.8;
-    f.burst_period_ms    = 26.67;       // TDMA slot timing
+    f.burst_period_ms = au::milli(au::seconds)(26.67);       // TDMA slot timing
     return f;
 }
 
@@ -27,7 +30,7 @@ analysis::AnalysisResult makeAisResult(const analysis::SignalFeatures& f)
     r.bandwidth_hz       = f.bandwidth_hz;
     r.snr_db             = f.snr_db;
     r.digital_modulation = "GMSK";
-    r.symbol_rate_sps    = 9600.0;
+    r.symbol_rate_sps = au::hertz(9600.0);
     r.m_ary              = 2;
     r.is_burst           = true;
     r.is_tdma            = true;
@@ -39,13 +42,13 @@ analysis::AnalysisResult makeAisResult(const analysis::SignalFeatures& f)
 analysis::SignalFeatures makeFmBroadcastFeatures()
 {
     analysis::SignalFeatures f;
-    f.center_freq_hz     = 100.1e6;
-    f.bandwidth_hz       = 200000.0;
+    f.center_freq_hz = au::hertz(100.1e6);
+    f.bandwidth_hz = au::hertz(200000.0);
     f.snr_db             = 35.0;
-    f.sample_rate_sps    = 2e6;
+    f.sample_rate_sps = au::hertz(2e6);
     f.sample_count       = 200000;
     f.envelope_variance_norm = 0.01;
-    f.fm_deviation_hz    = 75000.0;
+    f.fm_deviation_hz = au::hertz(75000.0);
     f.is_burst           = false;
     f.burst_duty_cycle   = 1.0;
     return f;
@@ -59,7 +62,7 @@ analysis::AnalysisResult makeFmBroadcastResult(const analysis::SignalFeatures& f
     r.snr_db             = f.snr_db;
     r.analog_modulation  = "FM_WB";
     r.analog_index       = 75000.0;
-    r.symbol_rate_sps    = 0.0;
+    r.symbol_rate_sps = au::hertz(0.0);
     r.is_burst           = false;
     r.burst_duty_cycle   = 1.0;
     r.classified         = true;
@@ -69,15 +72,15 @@ analysis::AnalysisResult makeFmBroadcastResult(const analysis::SignalFeatures& f
 analysis::SignalFeatures makeGsmFeatures()
 {
     analysis::SignalFeatures f;
-    f.center_freq_hz     = 935.2e6;   // GSM 900 downlink
-    f.bandwidth_hz       = 200000.0;
+    f.center_freq_hz = au::hertz(935.2e6);   // GSM 900 downlink
+    f.bandwidth_hz = au::hertz(200000.0);
     f.snr_db             = 20.0;
-    f.sample_rate_sps    = 2e6;
+    f.sample_rate_sps = au::hertz(2e6);
     f.sample_count       = 200000;
     f.envelope_variance_norm = 0.01;
     f.is_burst           = true;
     f.burst_duty_cycle   = 0.75;
-    f.burst_period_ms    = 4.615;     // GSM TDMA frame
+    f.burst_period_ms = au::milli(au::seconds)(4.615);     // GSM TDMA frame
     return f;
 }
 
@@ -88,7 +91,7 @@ analysis::AnalysisResult makeGsmResult(const analysis::SignalFeatures& f)
     r.bandwidth_hz       = f.bandwidth_hz;
     r.snr_db             = f.snr_db;
     r.digital_modulation = "GMSK";
-    r.symbol_rate_sps    = 270833.0;
+    r.symbol_rate_sps = au::hertz(270833.0);
     r.m_ary              = 2;
     r.is_burst           = true;
     r.is_tdma            = true;
@@ -213,14 +216,14 @@ TEST_F(ProtocolMapperTest, ReasoningIsNonEmpty)
 TEST_F(ProtocolMapperTest, LoRaHypothesis)
 {
     analysis::SignalFeatures f;
-    f.center_freq_hz     = 868.1e6;
-    f.bandwidth_hz       = 125000.0;
+    f.center_freq_hz = au::hertz(868.1e6);
+    f.bandwidth_hz = au::hertz(125000.0);
     f.snr_db             = 10.0;
     f.chirp_detected     = true;
     f.chirp_rate_hz_s    = 800000.0;
     f.is_burst           = true;
     f.burst_duty_cycle   = 0.3;
-    f.sample_rate_sps    = 1e6;
+    f.sample_rate_sps = au::hertz(1e6);
 
     analysis::AnalysisResult r{};
     r.center_freq_hz     = f.center_freq_hz;
@@ -249,15 +252,15 @@ TEST_F(ProtocolMapperTest, LoRaHypothesis)
 TEST_F(ProtocolMapperTest, WiFiHypothesis)
 {
     analysis::SignalFeatures f;
-    f.center_freq_hz     = 2437e6;   // Wi-Fi channel 6
-    f.bandwidth_hz       = 20e6;
+    f.center_freq_hz = au::hertz(2437e6);   // Wi-Fi channel 6
+    f.bandwidth_hz = au::hertz(20e6);
     f.snr_db             = 25.0;
     f.ofdm_detected      = true;
     f.ofdm_fft_size_est  = 64;
     f.ofdm_cp_ratio      = 0.25;
     f.is_burst           = false;
     f.burst_duty_cycle   = 1.0;
-    f.sample_rate_sps    = 40e6;
+    f.sample_rate_sps = au::hertz(40e6);
 
     analysis::AnalysisResult r{};
     r.center_freq_hz     = f.center_freq_hz;
