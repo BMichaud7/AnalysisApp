@@ -240,26 +240,29 @@ install(FILES config/analysis.xml
         DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/sdr-analysis)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
-include(FetchContent)
-FetchContent_Declare(googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG        v1.14.0)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
-enable_testing()
+include(CTest)
+if(BUILD_TESTING)
+    include(FetchContent)
+    FetchContent_Declare(googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG        v1.14.0)
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+    enable_testing()
 
-add_executable(analysis_tests
-    tests/unit/test_feature_extractor.cpp
-    tests/unit/test_modulation_classifier.cpp
-    tests/unit/test_protocol_mapper.cpp
-    tests/unit/test_analysis_engine.cpp
-)
-target_link_libraries(analysis_tests PRIVATE
-    analysis_lib
-    GTest::gtest_main
-)
-include(GoogleTest)
-gtest_discover_tests(analysis_tests)
+    add_executable(analysis_tests
+        tests/unit/test_feature_extractor.cpp
+        tests/unit/test_modulation_classifier.cpp
+        tests/unit/test_protocol_mapper.cpp
+        tests/unit/test_analysis_engine.cpp
+    )
+    target_link_libraries(analysis_tests PRIVATE
+        analysis_lib
+        GTest::gtest_main
+    )
+    include(GoogleTest)
+    gtest_discover_tests(analysis_tests)
+endif()
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 message(STATUS "┌─ AnalysisApp ${PROJECT_VERSION} ─────────────────────────────┐")

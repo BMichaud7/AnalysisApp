@@ -70,6 +70,7 @@ RUN cmake -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/install \
         -DFETCHCONTENT_QUIET=OFF \
+        -DBUILD_TESTING=OFF \
         -DWITH_ONNX=ON \
         -DONNXRUNTIME_ROOT=/opt/onnxruntime \
         -DWITH_DB=ON \
