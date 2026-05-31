@@ -1,6 +1,7 @@
 #include "AnalysisEngine.hpp"
 #include <au/units/seconds.hh>
-#include <chrono>
+
+#include <au/prefix.hh>
 #include <spdlog/spdlog.h>
 
 namespace analysis {
@@ -198,4 +199,4 @@ AnalysisResult AnalysisEngine::analyzeSnapshot(
     return result;
 }
 
-} // namespace analysis
+#include <chrono>

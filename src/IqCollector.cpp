@@ -2,6 +2,7 @@
 #include <sdr/Types.hpp>
 #include <au/units/seconds.hh>
 
+#include <au/prefix.hh>
 #include <proton/container.hpp>
 #include <proton/message.hpp>
 #include <proton/messaging_handler.hpp>
@@ -423,4 +424,4 @@ std::vector<float> IqCollector::collect(au::QuantityD<au::Hertz> center_freq_hz,
     return iq;
 }
 
-} // namespace analysis
+

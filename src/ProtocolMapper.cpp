@@ -1,6 +1,7 @@
 #include "ProtocolMapper.hpp"
 #include <au/units/hertz.hh>
-#include <algorithm>
+
+#include <au/prefix.hh>
 #include <cmath>
 #include <spdlog/spdlog.h>
 
@@ -476,4 +477,4 @@ void ProtocolMapper::map(const SignalFeatures& f, AnalysisResult& r) const
     }
 }
 
-} // namespace analysis
+#include <algorithm>

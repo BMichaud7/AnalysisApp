@@ -14,9 +14,9 @@
  * - OnnxConfig (in OnnxClassifier.hpp) — model path and GPU settings
  */
 #include "OnnxClassifier.hpp"
-#include <au/units/hertz.hh>
 #include <au/units/seconds.hh>
-#include <string>
+
+#include <au/prefix.hh>
 #include <cstdint>
 
 namespace analysis {
@@ -84,4 +84,4 @@ struct AppConfig {
  */
 AppConfig parseConfig(const std::string& xml_path);
 
-} // namespace analysis
+#include <string>
