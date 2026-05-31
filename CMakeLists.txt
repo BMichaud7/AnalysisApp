@@ -14,7 +14,8 @@ include(FetchContent)
 FetchContent_Declare(Au
     GIT_REPOSITORY https://github.com/aurora-opensource/au.git
     GIT_TAG        0.5.1
-    GIT_SHALLOW    TRUE)
+    GIT_SHALLOW    TRUE
+    EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(Au)
 
 # ── SdrSdk (provides sdr_task_api types via its subdirectory) ─────────────────
