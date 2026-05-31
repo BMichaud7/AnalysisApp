@@ -81,6 +81,7 @@ if(NOT spdlog_FOUND)
         FetchContent_Declare(spdlog
             GIT_REPOSITORY https://github.com/gabime/spdlog.git
             GIT_TAG        v1.13.0)
+        set(SPDLOG_FMT_EXTERNAL ON CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(spdlog)
     endif()
 endif()
