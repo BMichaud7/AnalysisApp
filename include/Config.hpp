@@ -17,6 +17,7 @@
 #include <au/units/hertz.hh>
 #include <au/units/seconds.hh>
 #include <au/prefix.hh>
+#include <string>
 #include <cstdint>
 
 namespace analysis {
@@ -84,4 +85,4 @@ struct AppConfig {
  */
 AppConfig parseConfig(const std::string& xml_path);
 
-#include <string>
+} // namespace analysis

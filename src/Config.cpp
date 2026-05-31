@@ -150,3 +150,5 @@ AppConfig parseConfig(const std::string& xml_path)
 
     return cfg;
 }
+
+} // namespace analysis

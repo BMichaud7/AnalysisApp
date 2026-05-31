@@ -425,3 +425,5 @@ std::vector<float> IqCollector::collect(au::QuantityD<au::Hertz> center_freq_hz,
 }
 
 
+
+} // namespace analysis

@@ -198,3 +198,5 @@ AnalysisResult AnalysisEngine::analyzeSnapshot(
 
     return result;
 }
+
+} // namespace analysis

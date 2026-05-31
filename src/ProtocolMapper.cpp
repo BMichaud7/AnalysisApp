@@ -476,3 +476,5 @@ void ProtocolMapper::map(const SignalFeatures& f, AnalysisResult& r) const
                       r.hypotheses[0].system, r.hypotheses[0].confidence);
     }
 }
+
+} // namespace analysis
