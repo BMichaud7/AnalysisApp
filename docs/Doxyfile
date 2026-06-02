@@ -1,5 +1,5 @@
 PROJECT_NAME           = "AnalysisApp"
-PROJECT_NUMBER         = "2.3"
+PROJECT_NUMBER         = "2.5.0"
 PROJECT_BRIEF          = "RF signal classifier — feature extraction, rule engine, ONNX inference"
 PROJECT_LOGO           =
 OUTPUT_DIRECTORY       = docs

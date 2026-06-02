@@ -1,6 +1,15 @@
 build/
 *.pyc
 __pycache__/
+*.db
+*.db-shm
+*.db-wal
+
+# ML tooling
+tools/ml/.venv/
+tools/ml/data/
+tools/ml/models/*.pt
+tools/ml/signals.db
 
 # Generated docs
 docs/html/
