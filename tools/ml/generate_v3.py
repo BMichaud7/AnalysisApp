@@ -86,8 +86,11 @@ def _impair(iq: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     # IQ phase skew (±3°)
     phi = rng.uniform(-0.05, 0.05)
     iq = iq.real * (1 + 0j) + iq.imag * (math.sin(phi) + 1j * math.cos(phi))
-    # Frequency offset (±2% of SR)
-    fo = rng.uniform(-0.02, 0.02) * SR
+    # Frequency offset (±0.3% of SR — post-AFC residual).
+    # ±2% SR caused 10+ full carrier rotations over 512 samples, destroying
+    # all constellation structure and making all modulations look identical.
+    # ±0.3% SR ≈ ±1.5 rotations — preserves constellation while staying robust.
+    fo = rng.uniform(-0.003, 0.003) * SR
     t  = np.arange(len(iq)) / SR
     iq = iq * np.exp(1j * 2 * math.pi * fo * t).astype(np.complex64)
     # Phase noise
