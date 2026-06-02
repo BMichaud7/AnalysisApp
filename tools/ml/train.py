@@ -46,8 +46,9 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler, random_split
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "test_harness"))
@@ -146,6 +147,26 @@ def build_tensors(args) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
     return X, y, cn
 
 
+# ── Focal loss ────────────────────────────────────────────────────────────────
+
+class FocalLoss(nn.Module):
+    """
+    Focal loss (Lin et al. 2017): down-weights easy examples so training
+    focuses on hard ones.  γ=2 is a good default; γ=0 reduces to cross-entropy.
+    """
+    def __init__(self, gamma: float = 2.0, weight=None, label_smoothing: float = 0.05):
+        super().__init__()
+        self.gamma           = gamma
+        self.weight          = weight
+        self.label_smoothing = label_smoothing
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce = F.cross_entropy(logits, targets, weight=self.weight,
+                             label_smoothing=self.label_smoothing, reduction="none")
+        pt = torch.exp(-ce)
+        return ((1 - pt) ** self.gamma * ce).mean()
+
+
 # ── Mixup augmentation ────────────────────────────────────────────────────────
 
 def mixup_batch(X: torch.Tensor, y: torch.Tensor, alpha: float = 0.3):
@@ -170,7 +191,8 @@ def train(model:       nn.Module,
           use_mixup:   bool  = True,
           warmup_epochs: int = 5,
           ckpt_path:   str | None = None,
-          class_weights: torch.Tensor | None = None) -> nn.Module:
+          class_weights: torch.Tensor | None = None,
+          focal_gamma: float | None = None) -> nn.Module:
 
     opt  = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
@@ -183,7 +205,11 @@ def train(model:       nn.Module,
 
     sched = optim.lr_scheduler.LambdaLR(opt, lr_lambda)
     w = class_weights.to(device) if class_weights is not None else None
-    crit  = nn.CrossEntropyLoss(weight=w, label_smoothing=0.1)
+    if focal_gamma is not None:
+        crit = FocalLoss(gamma=focal_gamma, weight=w, label_smoothing=0.05)
+        print(f"  Loss: FocalLoss(γ={focal_gamma})")
+    else:
+        crit = nn.CrossEntropyLoss(weight=w, label_smoothing=0.1)
     best_acc    = 0.0
     best_state  = None
     num_classes = next(iter(loader))[1].max().item() + 1
@@ -298,10 +324,14 @@ def main() -> None:
     ap.add_argument("--epochs",  type=int,   default=50)
     ap.add_argument("--batch",   type=int,   default=256)
     ap.add_argument("--lr",      type=float, default=1e-3)
-    ap.add_argument("--cuda",    action="store_true")
-    ap.add_argument("--out",     default="models/classifier.onnx", metavar="ONNX")
-    ap.add_argument("--resume",  default=None, metavar="PT",
+    ap.add_argument("--cuda",      action="store_true")
+    ap.add_argument("--out",       default="models/classifier.onnx", metavar="ONNX")
+    ap.add_argument("--resume",    default=None, metavar="PT",
                     help="Fine-tune from an existing checkpoint (.pt)")
+    ap.add_argument("--focal",     type=float, default=None, metavar="GAMMA",
+                    help="Use focal loss with this γ (e.g. 2.0). Default: cross-entropy.")
+    ap.add_argument("--boost-qam", type=float, default=None, metavar="FACTOR",
+                    help="Oversample QAM* classes by this factor via WeightedRandomSampler.")
     args = ap.parse_args()
 
     device = torch.device(
@@ -331,7 +361,22 @@ def main() -> None:
     kw = dict(batch_size=args.batch,
               num_workers=4 if _use_gpu else 0,
               pin_memory=_use_gpu)
-    train_loader = DataLoader(train_ds, shuffle=True,  **kw)
+
+    if args.boost_qam and args.boost_qam > 1.0:
+        qam_idx = {i for i, n in enumerate(class_names) if "QAM" in n}
+        train_labels = y[train_ds.indices]
+        sample_w = torch.where(
+            torch.tensor([int(l) in qam_idx for l in train_labels]),
+            torch.tensor(float(args.boost_qam)),
+            torch.ones(len(train_ds)),
+        )
+        sampler = WeightedRandomSampler(sample_w, len(train_ds), replacement=True)
+        train_loader = DataLoader(train_ds, sampler=sampler, **kw)
+        print(f"  QAM boost ×{args.boost_qam:.1f} via WeightedRandomSampler "
+              f"(classes: {sorted(class_names[i] for i in qam_idx)})")
+    else:
+        train_loader = DataLoader(train_ds, shuffle=True, **kw)
+
     val_loader   = DataLoader(val_ds,   shuffle=False, **kw)
     test_loader  = DataLoader(test_ds,  shuffle=False, **kw)
 
@@ -351,8 +396,16 @@ def main() -> None:
     if args.resume:
         print(f"  Resuming from {args.resume}")
         ckpt = torch.load(args.resume, map_location=device, weights_only=True)
-        model.load_state_dict(ckpt)
-        print(f"  Checkpoint loaded.")
+        current = model.state_dict()
+        # Keep only layers whose shape matches — mismatch happens when num_classes
+        # differs between the checkpoint and the current model (e.g. 24→28 classes).
+        compatible = {k: v for k, v in ckpt.items()
+                      if k in current and current[k].shape == v.shape}
+        reinit = sorted(set(current) - set(compatible))
+        model.load_state_dict(compatible, strict=False)
+        print(f"  Loaded {len(compatible)}/{len(current)} layers.")
+        if reinit:
+            print(f"  Re-initialised (shape mismatch): {reinit}")
 
     # ── Class weights (inverse frequency, capped at 10×) ─────────────────────
     train_y = y[train_ds.indices]
@@ -369,7 +422,8 @@ def main() -> None:
     model = train(model, train_loader, val_loader, device,
                   epochs=args.epochs, lr=args.lr,
                   use_mixup=True, warmup_epochs=min(5, args.epochs // 10),
-                  ckpt_path=ckpt_path, class_weights=weights)
+                  ckpt_path=ckpt_path, class_weights=weights,
+                  focal_gamma=args.focal)
 
     # ── Test + report ─────────────────────────────────────────────────────────
     print("\n── Test Set Evaluation ──")

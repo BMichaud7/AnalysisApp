@@ -146,7 +146,7 @@ The fast path fires before any SDR re-acquisition — ONNX runs on the 1 024-sam
 | tinyxml2 | ≥ 9 | `dnf install tinyxml2-devel` | `apt install libtinyxml2-dev` |
 | libuuid | any | `dnf install libuuid-devel` | `apt install uuid-dev` |
 | nlohmann/json | ≥ 3.11 | auto-fetched by CMake | `apt install nlohmann-json3-dev` |
-| spdlog | ≥ 1.12 | auto-fetched by CMake | `apt install libspdlog-dev` |
+| spdlog | ≥ 1.14.1 | auto-fetched by CMake (v1.14.1) | `apt install libspdlog-dev` |
 | **SdrTaskApi** | sibling | `git clone https://github.com/BMichaud7/SdrTaskApi.git ../SdrTaskApi` | same |
 
 ### Optional: ONNX Runtime (ML classification)
@@ -174,6 +174,48 @@ pip install numpy scipy matplotlib h5py tqdm scikit-learn
 ```bash
 pip install -r tools/ml/requirements.txt   # torch, onnx, onnxruntime-gpu, …
 ```
+
+The ML pipeline produces three ONNX artefacts:
+
+| File | Description |
+|---|---|
+| `models/dae_iq.pt` / `.onnx` | Denoising autoencoder — removes hardware impairments from raw IQ |
+| `models/amr_cnn_24class.onnx` | 28-class AMR ResNet classifier (opset 17) |
+| `models/amr_low_snr_denoised.onnx` | DAE → classifier chain; used when SNR < 5 dB |
+
+**Training the classifier:**
+
+```bash
+# Generate QAM-focused data with post-AFC impairments + multipath
+python generate_qam.py --out data/qam_heavy.npz --n 8000
+
+# Fine-tune on GPU with focal loss (γ=2) and 4× QAM oversampling
+python train.py --npz data/synth_v3.npz data/qam_heavy.npz \
+    --model resnet --epochs 20 --batch 512 --lr 2e-4 --cuda \
+    --focal 2.0 --boost-qam 4 \
+    --resume models/amr_cnn_24class.best.pt \
+    --out models/amr_cnn_24class.onnx
+```
+
+**Rebuilding the DAE chain** (run after retraining the classifier):
+
+```bash
+python - << 'EOF'
+import onnx
+from onnx import compose, version_converter
+dae = onnx.load("models/dae_iq.onnx")
+clf = onnx.load("models/amr_cnn_24class.onnx")
+clf_opset = clf.opset_import[0].version
+if dae.opset_import[0].version != clf_opset:
+    dae = version_converter.convert_version(dae, clf_opset)
+merged = compose.merge_models(
+    dae, compose.add_prefix(clf, prefix="clf_", rename_edges=True),
+    io_map=[("iq_clean", "clf_iq_input")])
+onnx.save(merged, "models/amr_low_snr_denoised.onnx")
+EOF
+```
+
+Or use `run_qam_fix.sh` which generates data, trains, and rebuilds the chain automatically.
 
 ---
 

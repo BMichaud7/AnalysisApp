@@ -32,10 +32,15 @@ echo "[$(ts)] Fine-tune complete — rebuilding DAE chain..."
 # ── Rebuild amr_low_snr_denoised.onnx ────────────────────────────────────────
 .venv/bin/python3 - << 'PYEOF'
 import onnx
-from onnx import compose
+from onnx import compose, version_converter
 
 dae = onnx.load("models/dae_iq.onnx")
 clf = onnx.load("models/amr_cnn_24class.onnx")
+
+# Align opset versions before merging (DAE may lag behind CNN on upgrades)
+clf_opset = clf.opset_import[0].version
+if dae.opset_import[0].version != clf_opset:
+    dae = version_converter.convert_version(dae, clf_opset)
 
 clf_prefixed = compose.add_prefix(clf, prefix="clf_", rename_edges=True)
 combined = compose.merge_models(dae, clf_prefixed,
