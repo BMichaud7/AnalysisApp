@@ -21,7 +21,16 @@ GPU training requires CUDA 11+ and a matching `torch` wheel (already in `require
 | `models/dae_iq.pt` / `.onnx` | `(B,2,512)` noisy IQ | `(B,2,512)` clean IQ | Denoising autoencoder |
 | `models/amr_low_snr_denoised.onnx` | `(B,2,512)` noisy IQ | `(B,28)` logits | DAE → classifier chain for SNR < 5 dB |
 
-## Quickstart: fix QAM classes (GPU)
+## Quickstart: full retrain with fixed data (GPU, recommended)
+
+```bash
+# Regenerate training data with corrected ±0.3% SR freq offset + retrain (60 epochs)
+./run_full_retrain.sh
+# Generates data/synth_v3_fixed.npz, trains fresh, rebuilds DAE chain
+# ~15 min generation + ~7 hours training on RTX 2060 Super
+```
+
+## Quickstart: fix QAM classes only (GPU)
 
 ```bash
 # 1. Generate QAM-focused data (post-AFC impairments + multipath, ~10 min CPU)
@@ -42,7 +51,9 @@ python generate_v3.py --out data/synth_v3.npz --n 2500 --len 512
 # 28 classes × 9 SNR steps × 2500 = 630 000 samples
 ```
 
-Generates RRC pulse-shaped digital modes, FM/AM variants, OFDM, CSS, LFM, TONE with PlutoSDR-realistic impairments (IQ imbalance, DC offset, frequency offset ±2% SR, phase noise).
+Generates RRC pulse-shaped digital modes, FM/AM variants, OFDM, CSS, LFM, TONE with PlutoSDR-realistic impairments (IQ imbalance, DC offset, frequency offset ±0.3% SR, phase noise).
+
+> **Important:** The original `_impair()` used ±2% SR frequency offset = ±10 full carrier rotations over 512 samples, destroying all constellation structure. This was fixed to ±0.3% SR (~1.5 rotations), which preserves constellation discriminability while staying robust to realistic post-AFC residual errors. Use `data/synth_v3_fixed.npz` — regenerate with this script rather than using the old `synth_v3.npz`.
 
 ### `generate_qam.py` — QAM-focused dataset
 
