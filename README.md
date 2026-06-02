@@ -180,7 +180,7 @@ The ML pipeline produces three ONNX artefacts:
 | File | Description |
 |---|---|
 | `models/dae_iq.pt` / `.onnx` | Denoising autoencoder — removes hardware impairments from raw IQ |
-| `models/amr_cnn_24class.onnx` | 28-class AMR ResNet classifier (opset 17) |
+| `models/amr_cnn_24class.onnx` | 28-class AMR ResNet classifier (opset 17) — macro val_acc 0.743, QAM256 recall 53% |
 | `models/amr_low_snr_denoised.onnx` | DAE → classifier chain; used when SNR < 5 dB |
 
 **Training the classifier:**
@@ -508,7 +508,8 @@ Rule confidence thresholds by modulation type:
 | AM, SSB, CW | 0.85 | Never |
 | FSK, MSK | 0.80 | Never |
 | BPSK, QPSK, 8PSK | 0.65 | When threshold > 0.65 |
-| QAM | 0.60 | When threshold > 0.60 |
+| QAM16/32/256 | 0.55 | When threshold > 0.55 (QAM256 recall ~53%) |
+| QAM64 | 0.45 | When threshold > 0.45 (hard to separate from QAM32/256) |
 | UNKNOWN | 0.00 | Always (if `fallback_on_unknown=true`) |
 
 ONNX results and the rule path that fired are reported in every published JSON:
