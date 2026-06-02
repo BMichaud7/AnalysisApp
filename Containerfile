@@ -4,15 +4,15 @@
 #  Base: CentOS Stream 10 (el10) — compatible with RHEL 10 / k3s nodes
 #
 #  Build:
-#    podman build -t sdr-analysis:2.3.0 .
-#    docker build -t sdr-analysis:2.3.0 .
+#    podman build -t sdr-analysis:2.5.0 .
+#    docker build -t sdr-analysis:2.5.0 .
 #
 #  Run:
 #    podman run --rm \
 #      -e SDR_CONFIG_PATH=/etc/sdr-analysis/analysis.xml \
 #      -v ./config/analysis.xml:/etc/sdr-analysis/analysis.xml:ro \
 #      -p 20000-20099:20000-20099/udp \
-#      sdr-analysis:2.3.0
+#      sdr-analysis:2.5.0
 # ════════════════════════════════════════════════════════════════════════
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────────
