@@ -414,6 +414,177 @@ def _acars(n: int, rng: np.random.Generator) -> np.ndarray:
     return _norm(iq)
 
 
+
+def _flex(n: int, rng: np.random.Generator) -> np.ndarray:
+    """FLEX paging: 4-FSK, 1600 baud, ±1600 Hz deviation. Includes sync 0xA8C9."""
+    sps = max(4, int(SR / 1600.0))
+    dev = np.array([-1600, -600, 600, 1600], dtype=float) / SR
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.integers(0, 4, n_syms)
+    # Insert FLEX sync word 0xA8C9 as dibits
+    sync_dibits = [2,2,3,1,2,2,3,1]  # 0xA8C9 approximated as 4-level
+    syms[:min(8,n_syms)] = sync_dibits[:min(8,n_syms)]
+    freq_seq = np.repeat([dev[s] for s in syms], sps)[:n]
+    phase = np.cumsum(2 * math.pi * freq_seq)
+    return _norm(np.exp(1j * phase).astype(np.complex64))
+
+
+def _mdc1200(n: int, rng: np.random.Generator) -> np.ndarray:
+    """MDC-1200: 2-FSK 1200 baud, ±1200 Hz. Motorola PTT ID."""
+    sps = max(4, int(SR / 1200.0))
+    dev = 1200.0 / SR
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.integers(0, 2, n_syms)
+    # Preamble: pre-tone at 1200 Hz then data
+    pre_len = min(16, n_syms)
+    syms[:pre_len] = 1  # idle at mark
+    freq_seq = np.repeat([dev if s else -dev for s in syms], sps)[:n]
+    phase = np.cumsum(2 * math.pi * freq_seq)
+    return _norm(np.exp(1j * phase).astype(np.complex64))
+
+
+def _dtmf(n: int, rng: np.random.Generator) -> np.ndarray:
+    """DTMF: dual-tone pairs on an AM carrier. Random digit sequence."""
+    rows = [697.0, 770.0, 852.0, 941.0]
+    cols = [1209.0, 1336.0, 1477.0, 1633.0]
+    t = np.arange(n) / SR
+    signal = np.zeros(n, dtype=np.float32)
+    # Generate 3-6 random DTMF digits
+    n_digits = rng.integers(3, 7)
+    dig_samples = n // (n_digits * 2)
+    for i in range(n_digits):
+        row = rng.integers(0, 4)
+        col = rng.integers(0, 4)
+        start = i * dig_samples * 2
+        end = min(start + dig_samples, n)
+        if start >= n: break
+        t_seg = t[start:end]
+        signal[start:end] = (np.sin(2*math.pi*rows[row]*t_seg) +
+                              np.sin(2*math.pi*cols[col]*t_seg)).astype(np.float32)
+    # AM modulate onto a carrier
+    carrier_hz = rng.uniform(0.05, 0.15) * SR
+    signal /= max(np.abs(signal).max(), 1e-9)
+    carrier = np.sin(2*math.pi*carrier_hz*t).astype(np.float32)
+    return _norm(((1.0 + 0.85*signal)*carrier).astype(np.complex64))
+
+
+def _eas_same(n: int, rng: np.random.Generator) -> np.ndarray:
+    """EAS/SAME: AFSK 520 baud, mark=2083 Hz, space=1563 Hz over AM."""
+    t = np.arange(n) / SR
+    baud = 520.833
+    mark_hz, space_hz = 2083.3, 1562.5
+    sps = max(4, int(SR / baud))
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.integers(0, 2, n_syms)
+    # Preamble: 16×0xAB = alternating 1/0
+    pre = [1 if (i//4)%2==0 else 0 for i in range(min(64,n_syms))]
+    syms[:len(pre)] = pre
+    audio_phase = 0.0
+    audio = np.zeros(n, np.float32)
+    for i in range(n):
+        tone = mark_hz if syms[min(i//sps,n_syms-1)] else space_hz
+        audio_phase += 2*math.pi*tone/SR
+        audio[i] = math.sin(audio_phase)
+    carrier_hz = rng.uniform(0.1, 0.25) * SR
+    carrier = np.sin(2*math.pi*carrier_hz*t).astype(np.float32)
+    return _norm(((1.0 + 0.85*audio)*carrier).astype(np.complex64))
+
+
+def _rtty(n: int, rng: np.random.Generator) -> np.ndarray:
+    """RTTY: 2-FSK 45.45 baud, ±85 Hz (170 Hz shift). Baudot ITA-2."""
+    sps = max(4, int(SR / 45.45))
+    dev = 85.0 / SR
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.integers(0, 2, n_syms)
+    freq_seq = np.repeat([dev if s else -dev for s in syms], sps)[:n]
+    phase = np.cumsum(2*math.pi*freq_seq)
+    return _norm(np.exp(1j*phase).astype(np.complex64))
+
+
+def _p25_phase2(n: int, rng: np.random.Generator) -> np.ndarray:
+    """P25 Phase 2: π/4-DQPSK, 12000 sym/s, 12.5 kHz channel."""
+    sps = max(4, int(SR / 12000.0))
+    const = _constellation(4, "psk")  # use QPSK constellation
+    syms = rng.choice(const, math.ceil(n/sps)+20)
+    # Apply π/4 rotation per symbol
+    for i in range(1, len(syms)):
+        syms[i] *= np.exp(1j * math.pi / 4)
+    iq = _apply_rrc(syms, sps, 0.2)
+    delay = (len(_rrc(sps, 0.2))-1)//2
+    return _norm(iq[delay:delay+n])
+
+
+def _adsb(n: int, rng: np.random.Generator) -> np.ndarray:
+    """ADS-B: Pulse-Position Modulation at 1090 MHz. Simulated PPM bursts."""
+    # PPM: 1 MHz bit rate → 1μs per bit at 200kHz SR = 0.2 samples/bit → upsample
+    # Simulate as OOK burst with 1μs pulses
+    us = max(1, int(SR / 1e6))  # samples per microsecond
+    signal = np.zeros(n, np.float32)
+    # Preamble pulses at 0, 1, 3.5, 4.5 μs
+    for pulse_us in [0, 1, 3.5, 4.5]:
+        start = min(int(pulse_us * us), n-us)
+        signal[start:min(start+us,n)] = 1.0
+    # Random data bits (PPM encoded)
+    n_bits = min(56, (n-8*us)//(2*us))
+    for bit_i in range(int(n_bits)):
+        bit = rng.integers(0, 2)
+        pos = 8*us + bit_i*2*us + bit*us
+        if pos+us < n: signal[pos:pos+us] = 1.0
+    # Carrier
+    carrier_hz = rng.uniform(0.3, 0.45) * SR
+    t = np.arange(n) / SR
+    carrier = (np.cos(2*math.pi*carrier_hz*t) + 1j*np.sin(2*math.pi*carrier_hz*t)).astype(np.complex64)
+    return _norm((signal.astype(np.complex64) * carrier))
+
+
+def _dsc(n: int, rng: np.random.Generator) -> np.ndarray:
+    """DSC Digital Selective Calling: FSK 1200 baud, ±400 Hz, marine VHF."""
+    sps = max(4, int(SR / 1200.0))
+    dev = 400.0 / SR
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.integers(0, 2, n_syms)
+    # DSC phasing sequence 0x7B7B
+    phase_dibits = [1,1,1,1,0,1,1,1,1,0,1,1,1,1,0,1]
+    syms[:min(16,n_syms)] = phase_dibits[:min(16,n_syms)]
+    freq_seq = np.repeat([dev if s else -dev for s in syms], sps)[:n]
+    phase = np.cumsum(2*math.pi*freq_seq)
+    return _norm(np.exp(1j*phase).astype(np.complex64))
+
+
+def _navtex(n: int, rng: np.random.Generator) -> np.ndarray:
+    """NAVTEX: FSK 100 baud, ±150 Hz, SITOR-B, maritime safety 518 kHz."""
+    sps = max(4, int(SR / 100.0))
+    dev = 150.0 / SR
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.integers(0, 2, n_syms)
+    # NAVTEX starts with ZCZC — encode as alternating bits
+    syms[:min(16,n_syms)] = [1,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0]
+    freq_seq = np.repeat([dev if s else -dev for s in syms], sps)[:n]
+    phase = np.cumsum(2*math.pi*freq_seq)
+    return _norm(np.exp(1j*phase).astype(np.complex64))
+
+
+def _vdl2(n: int, rng: np.random.Generator) -> np.ndarray:
+    """VDL Mode 2: D8PSK 10500 sym/s, 31.5 kbps, aviation 136 MHz."""
+    sps = max(4, int(SR / 10500.0))
+    const = _constellation(8, "psk")  # 8-PSK
+    syms = rng.choice(const, math.ceil(n/sps)+20)
+    iq = _apply_rrc(syms, sps, 0.6)
+    delay = (len(_rrc(sps, 0.6))-1)//2
+    return _norm(iq[delay:delay+n])
+
+
+def _psk31(n: int, rng: np.random.Generator) -> np.ndarray:
+    """PSK31: BPSK 31.25 baud, extremely narrow ~31 Hz BW. HF amateur."""
+    sps = max(4, int(SR / 31.25))
+    const = np.array([1.0+0j, -1.0+0j], dtype=np.complex64)  # BPSK
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.choice(const, n_syms)
+    iq = _apply_rrc(syms, sps, 0.2)
+    delay = (len(_rrc(sps, 0.2))-1)//2
+    return _norm(iq[delay:delay+n])
+
+
 # ── Class registry ────────────────────────────────────────────────────────────
 
 PSK_CONSTS = {
@@ -447,6 +618,10 @@ CLASS_NAMES = sorted([
     "AIS",        # AIS marine GMSK 9600 bps
     "POCSAG",     # POCSAG 2-FSK paging
     "ACARS",      # ACARS AM-FSK aircraft comm
+    "FLEX",        "MDC_1200",   "DTMF",
+    "EAS_SAME",    "RTTY",       "P25_PHASE2",
+    "ADS_B",       "DSC",        "NAVTEX",
+    "VDL2",        "PSK31",
 ])
 
 
@@ -483,6 +658,29 @@ def _gen_one(cls: str, n: int, rng: np.random.Generator) -> np.ndarray:
     if cls == "AIS":       return _ais(n, rng)
     if cls == "POCSAG":    return _pocsag(n, rng)
     if cls == "ACARS":     return _acars(n, rng)
+    if cls == "FLEX":      return _flex(n, rng)
+    if cls == "MDC_1200":  return _mdc1200(n, rng)
+    if cls == "DTMF":      return _dtmf(n, rng)
+    if cls == "EAS_SAME":  return _eas_same(n, rng)
+    if cls == "RTTY":      return _rtty(n, rng)
+    if cls == "P25_PHASE2":return _p25_phase2(n, rng)
+    if cls == "ADS_B":     return _adsb(n, rng)
+    if cls == "DSC":       return _dsc(n, rng)
+    if cls == "NAVTEX":    return _navtex(n, rng)
+    if cls == "VDL2":      return _vdl2(n, rng)
+    if cls == "PSK31":     return _psk31(n, rng)
+    if cls == "FLEX":      return _flex(n, rng)
+    if cls == "MDC_1200":  return _mdc1200(n, rng)
+    if cls == "DTMF":      return _dtmf(n, rng)
+    if cls == "EAS_SAME":  return _eas_same(n, rng)
+    if cls == "RTTY":      return _rtty(n, rng)
+    if cls == "P25_PHASE2":return _p25_phase2(n, rng)
+    if cls == "ADS_B":     return _adsb(n, rng)
+    if cls == "DSC":       return _dsc(n, rng)
+    if cls == "NAVTEX":    return _navtex(n, rng)
+    if cls == "VDL2":      return _vdl2(n, rng)
+    if cls == "PSK31":     return _psk31(n, rng)
+
     raise ValueError(f"Unknown class: {cls}")
 
 
