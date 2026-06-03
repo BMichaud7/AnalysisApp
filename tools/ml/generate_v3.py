@@ -558,7 +558,8 @@ def _navtex(n: int, rng: np.random.Generator) -> np.ndarray:
     n_syms = math.ceil(n / sps) + 5
     syms = rng.integers(0, 2, n_syms)
     # NAVTEX starts with ZCZC — encode as alternating bits
-    syms[:min(16,n_syms)] = [1,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0]
+    pre = [1,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0]
+    syms[:min(len(pre),n_syms)] = pre[:min(len(pre),n_syms)]
     freq_seq = np.repeat([dev if s else -dev for s in syms], sps)[:n]
     phase = np.cumsum(2*math.pi*freq_seq)
     return _norm(np.exp(1j*phase).astype(np.complex64))
