@@ -284,6 +284,136 @@ def _ook(n: int, rng: np.random.Generator, sps: int = 8) -> np.ndarray:
     return _digital(levels, n, rng, sps)
 
 
+# ── Protocol-specific generators ──────────────────────────────────────────────
+
+def _p25_c4fm(n: int, rng: np.random.Generator) -> np.ndarray:
+    """P25 Phase 1 C4FM: 4-level FSK, 4800 sym/s, ±600/±1800 Hz deviation.
+    Includes occasional P25 frame sync pattern for realism."""
+    # At SR=200kHz: 4800 sym/s → ~41.7 samples/sym; use fixed 40 sps
+    sps = 40
+    # Normalised deviations (Hz / SR)
+    dev = np.array([-1800, -600, 600, 1800], dtype=float) / SR
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.integers(0, 4, n_syms)
+    # Insert P25 frame sync (0x5575F5FF77FF) dibits with 40% probability
+    if rng.random() > 0.6 and n_syms > 24:
+        sync_dibits = [1,3,1,3,3,3,1,3,3,3,3,3,3,3,3,3,1,3,1,3,3,3,1,3]
+        syms[:min(24, n_syms)] = sync_dibits[:min(24, n_syms)]
+    freq_seq = np.repeat([dev[s] for s in syms], sps)[:n].astype(np.float64)
+    phase = np.cumsum(2 * math.pi * freq_seq)
+    return _norm(np.exp(1j * phase).astype(np.complex64))
+
+
+def _dmr(n: int, rng: np.random.Generator) -> np.ndarray:
+    """DMR (Digital Mobile Radio): 4FSK, 4800 sym/s, ±648/±1944 Hz deviation.
+    TDMA 2-slot, uses AMBE+2 voice. Common in commercial/public safety."""
+    sps = 40  # 200kHz/4800 ≈ 41 samples/sym
+    dev = np.array([-1944, -648, 648, 1944], dtype=float) / SR
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.integers(0, 4, n_syms)
+    # DMR voice sync: 0x755FD7DF75F7 (dibits: 1,3,1,1,3,3,1,3,1,3,3,3,3,1,3,...)
+    if rng.random() > 0.5 and n_syms > 24:
+        syms[:12] = [1, 3, 1, 1, 3, 3, 1, 3, 1, 3, 3, 3]
+    freq_seq = np.repeat([dev[s] for s in syms], sps)[:n].astype(np.float64)
+    phase = np.cumsum(2 * math.pi * freq_seq)
+    # DMR is TDMA — add burst envelope (on/off pattern for 2 slots)
+    burst_period = int(SR / 50)   # 50 Hz burst rate
+    env = np.ones(n, dtype=np.float32)
+    for start in range(0, n, burst_period):
+        end = min(start + burst_period // 2, n)
+        env[end:min(start + burst_period, n)] = 0.05  # guard interval
+    return _norm((np.exp(1j * phase) * env).astype(np.complex64))
+
+
+def _nxdn(n: int, rng: np.random.Generator) -> np.ndarray:
+    """NXDN: 4FSK, 4800 sym/s, ±1050/±3150 Hz (12.5 kHz BW).
+    FDMA digital voice used by Icom/Kenwood, common in industrial US."""
+    sps = 40
+    dev = np.array([-3150, -1050, 1050, 3150], dtype=float) / SR
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.integers(0, 4, n_syms)
+    # NXDN Frame Sync (hex: 0xAA or pattern-specific)
+    if rng.random() > 0.5 and n_syms > 8:
+        syms[:4] = [2, 2, 2, 2]  # preamble pattern
+    freq_seq = np.repeat([dev[s] for s in syms], sps)[:n].astype(np.float64)
+    phase = np.cumsum(2 * math.pi * freq_seq)
+    return _norm(np.exp(1j * phase).astype(np.complex64))
+
+
+def _dstar(n: int, rng: np.random.Generator) -> np.ndarray:
+    """D-STAR: GMSK, 4800 bps, BT=0.5. Amateur digital voice."""
+    return _gfsk(2, n, rng, sps=40, dev=SR * 0.024, bt=0.5)
+
+
+def _tetra(n: int, rng: np.random.Generator) -> np.ndarray:
+    """TETRA: π/4-DQPSK, 18000 sym/s (36 kbps), 25 kHz channel.
+    European public safety trunked radio standard."""
+    # π/4-QPSK: rotate constellation by π/4 each symbol
+    sps = int(rng.integers(4, 8))
+    angles = np.array([1, 3, 5, 7], dtype=float) * math.pi / 4
+    n_syms = math.ceil(n / sps) + 20
+    sym_idx = rng.integers(0, 4, n_syms)
+    # Apply π/4 rotation
+    phase_shifts = angles[sym_idx]
+    phases = np.cumsum(phase_shifts)
+    syms = np.exp(1j * phases).astype(np.complex64)
+    iq = _apply_rrc(syms, sps, rolloff=0.35)
+    delay = (len(_rrc(sps, 0.35)) - 1) // 2
+    return _norm(iq[delay:delay + n])
+
+
+def _ais(n: int, rng: np.random.Generator) -> np.ndarray:
+    """AIS (Automatic Identification System): GMSK, 9600 bps, BT=0.4.
+    Marine VHF channels 87B (161.975 MHz) and 88B (162.025 MHz)."""
+    # 9600 baud at 200kHz SR → ~20 sps
+    return _gfsk(2, n, rng, sps=20, dev=SR * 0.024, bt=0.4)
+
+
+def _pocsag(n: int, rng: np.random.Generator) -> np.ndarray:
+    """POCSAG: 2-FSK, 512/1200/2400 bps, ±4500 Hz deviation.
+    Paging protocol still used by hospitals, fire departments."""
+    baud = rng.choice([512, 1200, 2400])
+    sps = max(4, int(SR / baud))
+    dev = 4500.0 / SR
+    freqs = np.array([-dev, dev])
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.integers(0, 2, n_syms)
+    # POCSAG preamble: alternating 1/0 for 576 bits
+    if rng.random() > 0.3:
+        pre_len = min(32, n_syms)
+        syms[:pre_len] = [i % 2 for i in range(pre_len)]
+    freq_seq = np.repeat([freqs[s] for s in syms], sps)[:n]
+    phase = np.cumsum(2 * math.pi * freq_seq)
+    return _norm(np.exp(1j * phase).astype(np.complex64))
+
+
+def _acars(n: int, rng: np.random.Generator) -> np.ndarray:
+    """ACARS: AM-modulated 2400 bps FSK (2400 Hz / 1200 Hz tones).
+    Aircraft communications on VHF 129.125, 136.900 MHz etc."""
+    t = np.arange(n) / SR
+    # 2-FSK subcarrier at 1200 (space) or 2400 (mark) Hz
+    baud = 2400.0
+    sps = max(4, int(SR / baud))
+    n_syms = math.ceil(n / sps) + 5
+    syms = rng.integers(0, 2, n_syms)
+    # ACARS prekey: 1 second of 2400 Hz idle
+    if rng.random() > 0.5:
+        syms[:min(12, n_syms)] = 1
+    # FSK: 1=2400 Hz (mark), 0=1200 Hz (space)
+    tones = np.array([1200.0, 2400.0])
+    freq_seq = np.repeat([tones[s] for s in syms], sps)[:n]
+    audio = np.sin(2 * math.pi * np.cumsum(freq_seq / SR)).astype(np.float32)
+    audio /= max(np.abs(audio).max(), 1e-9)
+    # AM modulate: depth 0.85, carrier at ~20% of SR
+    carrier_freq = rng.uniform(0.10, 0.20) * SR
+    carrier = np.sin(2 * math.pi * carrier_freq * t).astype(np.float32)
+    depth = rng.uniform(0.7, 0.95)
+    am = ((1.0 + depth * audio) * carrier).astype(np.float32)
+    phase_angle = rng.uniform(0, 2 * math.pi)
+    iq = am * np.exp(1j * phase_angle).astype(np.complex64)
+    return _norm(iq)
+
+
 # ── Class registry ────────────────────────────────────────────────────────────
 
 PSK_CONSTS = {
@@ -301,12 +431,22 @@ QAM_CONSTS = {
 }
 
 CLASS_NAMES = sorted([
+    # Original 28 classes
     "OOK", "4ASK", "16ASK",
     "FSK", "4FSK", "8FSK", "MSK", "GFSK", "GMSK",
     "BPSK", "QPSK", "8PSK", "16PSK", "32PSK",
     "QAM16", "QAM32", "QAM64", "QAM256",
     "FM_NB", "FM_WB", "AM_DSB", "AM_DSB_SC", "AM_SSB_LSB", "AM_SSB_USB",
     "OFDM", "CSS", "LFM", "TONE",
+    # Protocol-specific classes (36 total)
+    "P25_C4FM",   # P25 Phase 1 control/voice channel
+    "DMR",        # Digital Mobile Radio (TDMA 4FSK)
+    "NXDN",       # NXDN FDMA digital voice
+    "DSTAR",      # D-STAR GMSK amateur digital
+    "TETRA",      # TETRA π/4-QPSK trunked
+    "AIS",        # AIS marine GMSK 9600 bps
+    "POCSAG",     # POCSAG 2-FSK paging
+    "ACARS",      # ACARS AM-FSK aircraft comm
 ])
 
 
@@ -334,6 +474,15 @@ def _gen_one(cls: str, n: int, rng: np.random.Generator) -> np.ndarray:
     if cls == "CSS":       return _css(n, rng)
     if cls == "LFM":       return _lfm(n, rng)
     if cls == "TONE":      return _tone(n, rng)
+    # Protocol-specific classes
+    if cls == "P25_C4FM":  return _p25_c4fm(n, rng)
+    if cls == "DMR":       return _dmr(n, rng)
+    if cls == "NXDN":      return _nxdn(n, rng)
+    if cls == "DSTAR":     return _dstar(n, rng)
+    if cls == "TETRA":     return _tetra(n, rng)
+    if cls == "AIS":       return _ais(n, rng)
+    if cls == "POCSAG":    return _pocsag(n, rng)
+    if cls == "ACARS":     return _acars(n, rng)
     raise ValueError(f"Unknown class: {cls}")
 
 
