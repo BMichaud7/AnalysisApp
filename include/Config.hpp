@@ -22,49 +22,77 @@
 
 namespace analysis {
 
-/// @brief AMQP broker connection and topic configuration.
+/**
+ * @brief AMQP broker connection and topic configuration.
+ *
+ * Loaded from the @c \<amqp\> block of analysis.xml.  All fields have safe
+ * defaults so individual elements can be omitted.
+ */
 struct AmqpConfig {
-    std::string url                 = "amqp://localhost:5672"; ///< Broker URL.
-    std::string username            = "sdr_ctrl";              ///< AMQP username.
-    std::string password            = "password";              ///< AMQP password.
-    std::string detections_topic    = "rf.detections";         ///< Topic to subscribe for detections.
-    std::string analysis_topic      = "rf.analysis";           ///< Topic to publish analysis results.
-    std::string task_request_queue  = "sdr.task.request";      ///< Queue for outbound task requests.
-    std::string task_response_queue = "sdr.task.response";     ///< Queue for inbound task responses.
-    /// Queue to receive REQUEST_DEMOD commands from a user app.
-    std::string demod_commands_queue = "sdr.demod.commands";
-    /// Queue to publish DEMOD_REQUEST messages to DemodApp.
-    std::string demod_request_queue  = "rf.demod.request";
+    std::string url                  = "amqp://localhost:5672"; ///< Broker URL. Supports amqp:// and amqps://.
+    std::string username             = "sdr_ctrl";              ///< AMQP username (empty = anonymous).
+    std::string password             = "password";              ///< AMQP password.
+    std::string detections_topic     = "rf.detections";         ///< Topic to subscribe for RF_DETECTION messages from AcquisitionApp.
+    std::string analysis_topic       = "rf.analysis";           ///< Topic to publish ANALYSIS_RESULT messages (consumed by DemodApp).
+    std::string task_request_queue   = "sdr.task.request";      ///< Queue for outbound IQ task requests to SdrResourceManager.
+    std::string task_response_queue  = "sdr.task.response";     ///< Queue for inbound task ACCEPTED/REJECTED responses.
+    std::string demod_commands_queue = "sdr.demod.commands";    ///< Subscribe: on-demand REQUEST_DEMOD commands from user apps.
+    std::string demod_request_queue  = "rf.demod.request";      ///< Publish: DEMOD_REQUEST messages to DemodApp.
 };
 
-/// @brief IQ collection parameters for the slow path.
+/**
+ * @brief IQ collection parameters for the slow-path analysis.
+ *
+ * The slow path is triggered when the fast-path ONNX snapshot confidence falls
+ * below the configured threshold.  A fresh NARROWBAND IQ capture is requested
+ * from SdrResourceManager for deeper feature extraction.
+ */
 struct CollectorConfig {
-    au::QuantityD<au::Hertz>   analysis_sample_rate_sps{au::hertz(2'000'000.0)}; ///< Sample rate for IQ collection.
-    /// Samples to collect per analysis.  65 536 samples at 2 MSPS = 32 ms — enough for
-    /// cumulants, symbol-rate estimation, and OFDM/FHSS detection down to ~4 800 baud.
+    /// Sample rate for slow-path IQ collection (samples/s).
+    /// 2 MSPS provides sufficient bandwidth for cumulant estimation,
+    /// symbol-rate detection, and OFDM/FHSS identification ≥ 4 800 baud.
+    au::QuantityD<au::Hertz>   analysis_sample_rate_sps{au::hertz(2'000'000.0)};
+
+    /// IQ samples to collect per slow-path analysis window.
+    /// 65 536 samples @ 2 MSPS = 32 ms — enough for 4th-order cumulants,
+    /// FM deviation measurement, and cyclic-prefix OFDM detection.
     int                        collect_samples{65'536};
-    au::QuantityD<au::Seconds> analysis_timeout_ms{au::milli(au::seconds)(5000)}; ///< Maximum wait for IQ task response.
+
+    /// Maximum time (ms) to wait for the IQ task ACCEPTED response from
+    /// SdrResourceManager.  Increase if the SDR is heavily contended.
+    au::QuantityD<au::Seconds> analysis_timeout_ms{au::milli(au::seconds)(5000)};
 };
 
-/// @brief Analysis pipeline configuration.
+/**
+ * @brief Analysis engine configuration — feature extraction and ML classifier.
+ *
+ * Loaded from the @c \<engine\> block of analysis.xml.
+ * Controls both the rule-based feature engine and the two ONNX model paths.
+ */
 struct EngineConfig {
-    double     fft_size            = 4096; ///< FFT size for feature extraction.
-    double     guard_band_fraction = 0.1;  ///< Fraction of bandwidth treated as roll-off guard.
-    double     snr_threshold_db    = 5.0;  ///< Minimum SNR to attempt classification (dB).
-    int        rank                = 2;    ///< Task rank: 2=Ana (preempts Acq=1, preempted by DF=3).
-    OnnxConfig onnx;                       ///< High-SNR ONNX classifier.
-    OnnxConfig onnx_low_snr;               ///< Low-SNR ONNX classifier (optional).
-    double     snr_model_split_db  = 8.0;  ///< SNR below which onnx_low_snr is used.
+    double     fft_size            = 4096; ///< FFT size for spectral features (power of 2, ≥ 64).
+    double     guard_band_fraction = 0.1;  ///< Roll-off guard fraction — bins at band edges are excluded.
+    double     snr_threshold_db    = 5.0;  ///< Minimum SNR (dB) to attempt ONNX classification. Signals below this use rule engine only.
+    int        rank                = 2;    ///< IQ-fetch priority: 1=Acq (lowest), 2=Analysis, 3=DF (highest).
+    OnnxConfig onnx;                       ///< Primary (high-SNR) ONNX classifier. 47-class RadioResNet, val_acc=0.748.
+    OnnxConfig onnx_low_snr;               ///< Optional low-SNR classifier (DAE denoised). Used when SNR < snr_model_split_db.
+    double     snr_model_split_db  = 8.0;  ///< SNR (dB) below which onnx_low_snr is preferred over onnx.
 };
 
-/// @brief PostgreSQL persistence configuration.
+/**
+ * @brief PostgreSQL persistence configuration.
+ *
+ * Loaded from the optional @c \<database\> block of analysis.xml.
+ * When absent, @c enabled remains false and no database connection is opened.
+ * Classification results are written to the @c signals table (same schema as AcquisitionApp).
+ */
 struct DbConfig {
     std::string host     = "localhost";   ///< Database host.
     int         port     = 5432;          ///< Database port.
     std::string dbname   = "sdr_scanner"; ///< Database name.
     std::string user     = "sdr";         ///< Database user.
     std::string password = "";            ///< Database password.
-    bool        enabled  = false;         ///< True when a <database> block is present in XML.
+    bool        enabled  = false;         ///< Automatically set to true when a @c \<database\> block is present.
 };
 
 /// @brief Top-level configuration for AnalysisApp.

@@ -1,43 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AnalysisApp — Signal Classification Configuration
+  ═══════════════════════════════════════════════════════════════════════════
+  Loaded at startup by parseConfig().  All elements are optional — unrecognised
+  elements are silently ignored and defaults from Config.hpp are preserved.
+
+  Build with ONNX support:
+    cmake -DWITH_ONNX=ON -DONNXRUNTIME_ROOT=/opt/onnxruntime-linux-x64-gpu-1.17.3
+
+  Run:
+    ./build/sdr_analysis config/analysis.xml
+
+  Model files (copy to /opt/models/ or adjust model_path):
+    amr_cnn_47class.onnx              — 47-class RadioResNet (val_acc=0.748)
+    amr_cnn_47class.classes.json      — class index → label mapping
+    amr_low_snr_denoised_47class.onnx — DAE + 47-class merged model for low-SNR
+-->
 <sdr_analysis>
+
+  <!-- Unique identifier for this analysis instance — appears in AMQP messages -->
   <scanner_id>analysis-0</scanner_id>
+
+  <!-- Local IP for UDP IQ receive sockets.  Must be routable FROM the
+       SdrResourceManager host.  Use the actual interface IP, not 0.0.0.0,
+       when ResourceManager and AnalysisApp run on different machines. -->
   <streaming_ip>127.0.0.1</streaming_ip>
 
+  <!-- ── AMQP broker ──────────────────────────────────────────────────────── -->
   <amqp>
-    <url>amqp://activemq-service.sdr-system:5672</url>
+    <!-- Broker URL.  Supports amqp:// (plain) and amqps:// (TLS). -->
+    <url>amqp://localhost:5672</url>
     <username>sdr_ctrl</username>
-    <password>your_password</password>
+    <password>CHANGE_ME</password>
+
+    <!-- Subscribe to RF_DETECTION messages produced by AcquisitionApp -->
     <detections_topic>rf.detections</detections_topic>
+
+    <!-- Publish ANALYSIS_RESULT messages (consumed by DemodApp) -->
     <analysis_topic>rf.analysis</analysis_topic>
+
+    <!-- Queues for IQ task requests to SdrResourceManager -->
     <task_request_queue>sdr.task.request</task_request_queue>
     <task_response_queue>sdr.task.response</task_response_queue>
+
     <!-- Subscribe: REQUEST_DEMOD commands from a user app or CLI tool -->
     <demod_commands_queue>sdr.demod.commands</demod_commands_queue>
-    <!-- Publish: DEMOD_REQUEST messages to DemodApp -->
+
+    <!-- Publish: DEMOD_REQUEST messages to DemodApp for on-demand demodulation -->
     <demod_request_queue>rf.demod.request</demod_request_queue>
   </amqp>
 
+  <!-- ── IQ collector (slow path) ─────────────────────────────────────────── -->
+  <!-- The slow path is triggered when fast-path ONNX confidence < threshold.
+       It requests a fresh IQ capture from SdrResourceManager for deep analysis. -->
   <collector>
+    <!-- Sample rate for IQ collection (samples/s).  2 MSPS is sufficient for
+         cumulants, symbol-rate estimation, and OFDM/FHSS detection ≥4 800 baud. -->
     <analysis_sample_rate_sps>2000000</analysis_sample_rate_sps>
-    <collect_samples>1000000</collect_samples>
+
+    <!-- Number of IQ samples to collect per slow-path analysis.
+         65 536 samples @ 2 MSPS = 32 ms — enough for cumulant estimation. -->
+    <collect_samples>65536</collect_samples>
+
+    <!-- Maximum milliseconds to wait for IQ task response from ResourceManager. -->
     <analysis_timeout_ms>5000</analysis_timeout_ms>
   </collector>
 
+  <!-- ── Analysis engine ───────────────────────────────────────────────────── -->
   <engine>
+    <!-- FFT size for spectral feature extraction (must be power of 2, ≥ 64). -->
     <fft_size>4096</fft_size>
-    <snr_threshold_db>5.0</snr_threshold_db>
-    <rank>1</rank>
 
-    <!-- ONNX ML fallback — remove or omit <model_path> to disable -->
-    <!-- Build with: cmake -DWITH_ONNX=ON -DONNXRUNTIME_ROOT=/opt/onnxruntime-linux-x64-gpu-1.17.3 -->
-    <!--
+    <!-- Minimum SNR (dB) to attempt ML classification.  Signals below this
+         threshold are classified by rule engine only (no ONNX inference). -->
+    <snr_threshold_db>5.0</snr_threshold_db>
+
+    <!-- Task priority rank: 1=Acq (lowest), 2=Analysis, 3=DF (highest).
+         Higher-rank tasks preempt lower-rank tasks in SdrResourceManager. -->
+    <rank>2</rank>
+
+    <!-- SNR threshold below which onnx_low_snr model is used instead of onnx.
+         Signals with SNR < snr_model_split_db use the DAE-denoised model. -->
+    <snr_model_split_db>8.0</snr_model_split_db>
+
+    <!-- ── Primary ONNX classifier (high-SNR fast path, ~5 ms on GPU) ──────── -->
+    <!-- Remove or comment out to disable ONNX classification entirely.
+         Requires ANALYSIS_WITH_ONNX build flag and ONNX Runtime installation.
+
+         47-class RadioResNet model: val_acc=0.748 (best epoch 38/40)
+         Input:  (1, 2, 512) — 2-channel real (I/Q), 512 samples
+         Output: (1, 47) — softmax probability per class
+         Classes: FM_WB · FM_NB · AM_DSB · AM_DSB_SC · AM_SSB_USB · AM_SSB_LSB
+                  BPSK · QPSK · 8PSK · 16PSK · 32PSK · QAM16 · QAM32 · QAM64
+                  QAM256 · 4ASK · 16ASK · FSK · 4FSK · 8FSK · MSK · GFSK · GMSK
+                  OOK · OFDM · CSS · LFM · TONE · P25_C4FM · DMR · NXDN · DSTAR
+                  TETRA · AIS · POCSAG · ACARS · APRS · FLEX · MDC_1200 · DTMF
+                  EAS_SAME · RTTY · P25_PHASE2 · ADS_B · DSC · NAVTEX · VDL2 · PSK31
+    -->
     <onnx>
-      <model_path>/opt/models/amr.onnx</model_path>
-      <classes_path>/opt/models/amr.classes.json</classes_path>
+      <!-- Path to the ONNX model file.  Relative paths resolve from CWD. -->
+      <model_path>/opt/models/amr_cnn_47class.onnx</model_path>
+
+      <!-- Path to the JSON class-index → label mapping file. -->
+      <classes_path>/opt/models/amr_cnn_47class.classes.json</classes_path>
+
+      <!-- Try CUDA execution provider; fall back to CPU if unavailable. -->
       <use_gpu>true</use_gpu>
+
+      <!-- Try TensorRT EP before CUDA EP (best throughput on RTX GPUs). -->
+      <use_tensorrt>false</use_tensorrt>
+
+      <!-- Number of IQ samples in the model input window. Must match training. -->
       <input_len>1024</input_len>
+
+      <!-- Run ONNX when the rule engine produces confidence below this value. -->
       <fallback_confidence_threshold>0.60</fallback_confidence_threshold>
+
+      <!-- Always run ONNX when rule result is UNKNOWN (even if above threshold). -->
       <fallback_on_unknown>true</fallback_on_unknown>
+
+      <!-- Maximum signals to classify per batch call (higher = better GPU util). -->
+      <max_batch>8</max_batch>
     </onnx>
+
+    <!-- ── Low-SNR ONNX classifier (DAE denoised, used when SNR < snr_model_split_db) -->
+    <!-- Uses a denoising autoencoder fused with the classifier for noisy signals.
+         Omit this block to always use the primary model regardless of SNR. -->
+    <!--
+    <onnx_low_snr>
+      <model_path>/opt/models/amr_low_snr_denoised_47class.onnx</model_path>
+      <classes_path>/opt/models/amr_cnn_47class.classes.json</classes_path>
+      <use_gpu>true</use_gpu>
+      <use_tensorrt>false</use_tensorrt>
+      <input_len>1024</input_len>
+      <fallback_confidence_threshold>0.50</fallback_confidence_threshold>
+      <fallback_on_unknown>true</fallback_on_unknown>
+      <max_batch>8</max_batch>
+    </onnx_low_snr>
     -->
   </engine>
+
 </sdr_analysis>
