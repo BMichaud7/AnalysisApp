@@ -136,3 +136,23 @@ The `watch_finetune.sh` and `run_qam_fix.sh` scripts do this automatically.
 ## Class list (28 classes)
 
 `16ASK`, `16PSK`, `32PSK`, `4ASK`, `4FSK`, `8FSK`, `8PSK`, `AM_DSB`, `AM_DSB_SC`, `AM_SSB_LSB`, `AM_SSB_USB`, `BPSK`, `CSS`, `FM_NB`, `FM_WB`, `FSK`, `GFSK`, `GMSK`, `LFM`, `MSK`, `OFDM`, `OOK`, `QAM16`, `QAM256`, `QAM32`, `QAM64`, `QPSK`, `TONE`
+
+---
+
+## 36-class model (current — includes protocol classes)
+
+Training completed. Results:
+
+| Metric | 28-class | 36-class |
+|---|---|---|
+| Val accuracy | 0.743 | **0.780** |
+| Min class accuracy | 0.065 | 0.087 |
+
+New classes: P25_C4FM, DMR, NXDN, DSTAR, TETRA, AIS, POCSAG, ACARS
+
+Models: `models/amr_cnn_36class.onnx`, `models/amr_low_snr_denoised_36class.onnx`
+
+Generate + train:
+```bash
+./run_protocol_retrain.sh   # generates synth_v3_protocols.npz + trains 36-class
+```
