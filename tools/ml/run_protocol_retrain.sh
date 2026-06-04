@@ -1,4 +1,14 @@
 #!/bin/bash
+# ========================================================================
+# Project: OpenRFStack
+# Author:  Brendan Michaud
+# Year:    2026
+# Part of OpenRFStack (https://github.com/OpenRFStack)
+#
+# Licensed under the Personal Use License.
+# Do not use for commercial, organizational, or military purposes.
+# ========================================================================
+
 # run_protocol_retrain.sh — regenerate with 36 classes (28 original + 8 protocols)
 # then train fresh on GPU.
 set -euo pipefail

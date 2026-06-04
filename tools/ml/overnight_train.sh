@@ -1,4 +1,14 @@
 #!/bin/bash
+# ========================================================================
+# Project: OpenRFStack
+# Author:  Brendan Michaud
+# Year:    2026
+# Part of OpenRFStack (https://github.com/OpenRFStack)
+#
+# Licensed under the Personal Use License.
+# Do not use for commercial, organizational, or military purposes.
+# ========================================================================
+
 # overnight_train.sh — Chained overnight training pipeline.
 # Waits for any current train.py to finish, then runs:
 #   1. Large synthetic dataset generation (v3 large, snr step=2)

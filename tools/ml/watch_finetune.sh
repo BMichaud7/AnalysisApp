@@ -1,4 +1,14 @@
 #!/bin/bash
+# ========================================================================
+# Project: OpenRFStack
+# Author:  Brendan Michaud
+# Year:    2026
+# Part of OpenRFStack (https://github.com/OpenRFStack)
+#
+# Licensed under the Personal Use License.
+# Do not use for commercial, organizational, or military purposes.
+# ========================================================================
+
 # watch_finetune.sh — Wait for 24-class fine-tune to finish, rebuild DAE chain,
 # restart sdr-analysis.
 #

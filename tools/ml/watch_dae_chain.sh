@@ -1,4 +1,14 @@
 #!/bin/bash
+# ========================================================================
+# Project: OpenRFStack
+# Author:  Brendan Michaud
+# Year:    2026
+# Part of OpenRFStack (https://github.com/OpenRFStack)
+#
+# Licensed under the Personal Use License.
+# Do not use for commercial, organizational, or military purposes.
+# ========================================================================
+
 # watch_dae_chain.sh — Wait for DAE retrain to finish, re-chain with 24-class
 # classifier, update amr_low_snr_denoised.onnx, and restart sdr-analysis.
 #

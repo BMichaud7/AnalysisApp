@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# ========================================================================
+# Project: OpenRFStack
+# Author:  Brendan Michaud
+# Year:    2026
+# Part of OpenRFStack (https://github.com/OpenRFStack)
+#
+# Licensed under the Personal Use License.
+# Do not use for commercial, organizational, or military purposes.
+# ========================================================================
+
 # Run AnalysisApp integration tests.
 # Starts broker + AnalysisApp, runs e2e_test.py, tears down on exit.
 set -euo pipefail

@@ -1,4 +1,14 @@
 #!/bin/bash
+# ========================================================================
+# Project: OpenRFStack
+# Author:  Brendan Michaud
+# Year:    2026
+# Part of OpenRFStack (https://github.com/OpenRFStack)
+#
+# Licensed under the Personal Use License.
+# Do not use for commercial, organizational, or military purposes.
+# ========================================================================
+
 # run_full_retrain.sh — regenerate data with fixed freq offset, then retrain.
 set -euo pipefail
 cd "$(dirname "$0")"

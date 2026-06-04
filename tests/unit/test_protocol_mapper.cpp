@@ -1,3 +1,15 @@
+/*
+========================================================================
+Project: OpenRFStack
+Author:  Brendan Michaud
+Year:    2026
+Part of OpenRFStack (https://github.com/OpenRFStack)
+
+Licensed under the Personal Use License.
+Do not use for commercial, organizational, or military purposes.
+Contact author for permission: https://github.com/OpenRFStack
+========================================================================
+*/
 #include <au/prefix.hh>
 #include <au/units/seconds.hh>
 #include <au/units/hertz.hh>

@@ -1,4 +1,15 @@
 #!/usr/bin/env python3
+# ========================================================================
+# Project: OpenRFStack
+# Author:  Brendan Michaud
+# Year:    2026
+# Part of OpenRFStack (https://github.com/OpenRFStack)
+#
+# Licensed under the Personal Use License.
+# Do not use for commercial, organizational, or military purposes.
+# Contact author for permission: https://github.com/OpenRFStack
+# ========================================================================
+
 """
 Train an AMR classifier on any supported dataset.
 
@@ -182,34 +193,49 @@ def mixup_loss(crit, logits, y_a, y_b, lam):
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
-def train(model:       nn.Module,
-          loader:      DataLoader,
-          val_loader:  DataLoader,
-          device:      torch.device,
-          epochs:      int,
-          lr:          float = 1e-3,
-          use_mixup:   bool  = True,
-          warmup_epochs: int = 5,
-          ckpt_path:   str | None = None,
-          class_weights: torch.Tensor | None = None,
-          focal_gamma: float | None = None) -> nn.Module:
+def train(model:          nn.Module,
+          loader:         DataLoader,
+          val_loader:     DataLoader,
+          device:         torch.device,
+          epochs:         int,
+          lr:             float = 1e-3,
+          use_mixup:      bool  = True,
+          warmup_epochs:  int   = 5,
+          ckpt_path:      str | None = None,
+          class_weights:  torch.Tensor | None = None,
+          focal_gamma:    float | None = None,
+          label_smoothing: float = 0.05,
+          sgdr_t0:        int   = 0) -> nn.Module:
+    """
+    Train model with:
+      - AdamW optimiser, gradient clipping
+      - Linear warmup + cosine annealing (or SGDR with sgdr_t0 restart period)
+      - Optional focal loss + label smoothing
+      - Mixup augmentation after warmup
+      - Per-class val_acc tracking; saves best checkpoint
+    """
+    opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
-    opt  = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    if sgdr_t0 > 0:
+        # Cosine annealing with warm restarts (SGDR) — resets LR every T_0 epochs
+        sched = optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=sgdr_t0, T_mult=1, eta_min=1e-6)
+        print(f"  LR schedule: SGDR T_0={sgdr_t0} (warm restart every {sgdr_t0} epochs)")
+    else:
+        # Linear warmup then single cosine decay
+        def lr_lambda(ep):
+            if ep < warmup_epochs:
+                return float(ep + 1) / warmup_epochs
+            prog = (ep - warmup_epochs) / max(1, epochs - warmup_epochs)
+            return 0.5 * (1.0 + math.cos(math.pi * prog))
+        sched = optim.lr_scheduler.LambdaLR(opt, lr_lambda)
 
-    # Linear warmup then cosine annealing
-    def lr_lambda(ep):
-        if ep < warmup_epochs:
-            return float(ep + 1) / warmup_epochs
-        prog = (ep - warmup_epochs) / max(1, epochs - warmup_epochs)
-        return 0.5 * (1.0 + math.cos(math.pi * prog))
-
-    sched = optim.lr_scheduler.LambdaLR(opt, lr_lambda)
     w = class_weights.to(device) if class_weights is not None else None
     if focal_gamma is not None:
-        crit = FocalLoss(gamma=focal_gamma, weight=w, label_smoothing=0.05)
-        print(f"  Loss: FocalLoss(γ={focal_gamma})")
+        crit = FocalLoss(gamma=focal_gamma, weight=w, label_smoothing=label_smoothing)
+        print(f"  Loss: FocalLoss(γ={focal_gamma}, label_smoothing={label_smoothing})")
     else:
-        crit = nn.CrossEntropyLoss(weight=w, label_smoothing=0.1)
+        crit = nn.CrossEntropyLoss(weight=w, label_smoothing=label_smoothing)
+        print(f"  Loss: CrossEntropy(label_smoothing={label_smoothing})")
     best_acc    = 0.0
     best_state  = None
     num_classes = next(iter(loader))[1].max().item() + 1
@@ -321,6 +347,10 @@ def main() -> None:
     ap.add_argument("--model",   default="resnet",
                     choices=["cnn","resnet","fusion"],
                     help="Model architecture (default resnet)")
+    ap.add_argument("--channels",  type=int,   default=128,
+                    help="ResNet channel width (default 128; try 256 or 512 for higher accuracy)")
+    ap.add_argument("--n-blocks",  type=int,   default=8,
+                    help="Number of residual blocks (default 8; try 10-12 for larger model)")
     ap.add_argument("--epochs",  type=int,   default=50)
     ap.add_argument("--batch",   type=int,   default=256)
     ap.add_argument("--lr",      type=float, default=1e-3)
@@ -330,6 +360,10 @@ def main() -> None:
                     help="Fine-tune from an existing checkpoint (.pt)")
     ap.add_argument("--focal",     type=float, default=None, metavar="GAMMA",
                     help="Use focal loss with this γ (e.g. 2.0). Default: cross-entropy.")
+    ap.add_argument("--label-smoothing", type=float, default=0.05, metavar="EPS",
+                    help="Label smoothing ε for loss function (default 0.05).")
+    ap.add_argument("--sgdr-t0",   type=int,   default=0, metavar="EPOCHS",
+                    help="Cosine annealing warm restart period T_0 (0 = disabled, use single decay).")
     ap.add_argument("--boost-qam", type=float, default=None, metavar="FACTOR",
                     help="Oversample QAM* classes by this factor via WeightedRandomSampler.")
     args = ap.parse_args()
@@ -385,7 +419,8 @@ def main() -> None:
         model = RadioCNN(num_classes=num_classes, input_len=input_len)
     elif args.model == "resnet":
         model = RadioResNet(num_classes=num_classes, input_len=input_len,
-                            channels=128, n_blocks=8)
+                            channels=args.channels, n_blocks=args.n_blocks)
+        print(f"  RadioResNet: channels={args.channels}, n_blocks={args.n_blocks}")
     else:
         model = RadioFusion(num_classes=num_classes, input_len=input_len)
 
@@ -423,7 +458,9 @@ def main() -> None:
                   epochs=args.epochs, lr=args.lr,
                   use_mixup=True, warmup_epochs=min(5, args.epochs // 10),
                   ckpt_path=ckpt_path, class_weights=weights,
-                  focal_gamma=args.focal)
+                  focal_gamma=args.focal,
+                  label_smoothing=args.label_smoothing,
+                  sgdr_t0=args.sgdr_t0)
 
     # ── Test + report ─────────────────────────────────────────────────────────
     print("\n── Test Set Evaluation ──")

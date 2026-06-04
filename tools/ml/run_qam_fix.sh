@@ -1,4 +1,14 @@
 #!/bin/bash
+# ========================================================================
+# Project: OpenRFStack
+# Author:  Brendan Michaud
+# Year:    2026
+# Part of OpenRFStack (https://github.com/OpenRFStack)
+#
+# Licensed under the Personal Use License.
+# Do not use for commercial, organizational, or military purposes.
+# ========================================================================
+
 # run_qam_fix.sh — generate QAM-heavy data then fine-tune on GPU.
 # Usage: ./run_qam_fix.sh  (runs generation + training end-to-end)
 set -euo pipefail
