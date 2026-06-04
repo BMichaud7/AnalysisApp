@@ -485,3 +485,9 @@ class FeatureExtractor:
                 burst_period_ms  = float(period_ms)
 
         return duty_cycle < 0.85, duty_cycle, burst_period_ms
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

@@ -69,3 +69,9 @@ print(f"Chain OK: opset={m.opset_import[0].version}")
 PYEOF
 
 echo "[$(ts)] Done. Models: amr_cnn_36class.onnx + amr_low_snr_denoised_36class.onnx"
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

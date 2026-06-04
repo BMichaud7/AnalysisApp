@@ -111,3 +111,9 @@ podman run --rm \
 echo "[$(ts)] Eval complete — report at /ml/data/finetune_report.json"
 
 echo "[$(ts)] Done."
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

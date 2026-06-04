@@ -60,3 +60,9 @@ if [[ "$RUN_TESTS" == "true" ]]; then
 fi
 
 echo "[build.sh] Done. Binary: $BUILD_DIR/sdr_analysis"
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

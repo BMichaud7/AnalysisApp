@@ -96,3 +96,9 @@ podman logs sdr-analysis --tail 8 2>/dev/null
 # Clean up new files so the watcher is idempotent if re-run
 rm -f "$NEW_ONNX" "$NEW_PT"
 echo "[$(ts)] Done."
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

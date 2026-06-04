@@ -585,3 +585,9 @@ def _build_protocol_db() -> list[dict]:
         dict(name="Weather Radar (WSR-88D)", category="Radar",
              freq_bands_mhz=[(2700.0, 2900.0)], burst=True),
     ]
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

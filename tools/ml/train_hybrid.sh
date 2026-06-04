@@ -56,3 +56,9 @@ echo "[train_hybrid] Done. Model: models/amr_cnn_28class.onnx"
 
 # Copy classes JSON so scan.sh can find it
 ls -lh models/amr_cnn_28class.onnx models/amr_cnn_28class.classes.json 2>/dev/null
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

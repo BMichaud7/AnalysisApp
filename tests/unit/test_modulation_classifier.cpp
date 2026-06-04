@@ -223,3 +223,11 @@ TEST_F(ModulationClassifierTest, BitRateFromSymbolRate)
     EXPECT_EQ(r.m_ary, 4);
     EXPECT_NEAR(r.bit_rate_bps, 9600.0 * 2.0, 1.0);  // QPSK → 2 bits/sym
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

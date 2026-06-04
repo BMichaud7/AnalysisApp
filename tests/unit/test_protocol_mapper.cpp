@@ -295,3 +295,11 @@ TEST_F(ProtocolMapperTest, WiFiHypothesis)
     EXPECT_TRUE(found_wifi)
         << "Wi-Fi 2.4 GHz should appear in top hypotheses for 2437 MHz OFDM 20 MHz";
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

@@ -51,3 +51,9 @@ echo "=== Tearing down ==="
 podman-compose -f compose.yml down --timeout 5
 
 exit $RC
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

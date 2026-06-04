@@ -114,3 +114,11 @@ TEST(AnalysisEngine, FullAnalyze_ZeroInput_StillRuns) {
         engine.analyze(zeros, au::hertz(2e6), au::hertz(100e6), "id", "scanner");
     });
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

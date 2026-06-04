@@ -126,3 +126,11 @@ struct AppConfig {
 AppConfig parseConfig(const std::string& xml_path);
 
 } // namespace analysis
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

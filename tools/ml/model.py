@@ -268,3 +268,9 @@ def export_onnx(model: nn.Module,
     print(f"ONNX model exported and validated → {out_path}")
     print(f"  Input:  {input_shape}")
     print(f"  Output: {out[0].shape}")
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

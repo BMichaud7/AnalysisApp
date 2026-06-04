@@ -713,3 +713,11 @@ SignalFeatures FeatureExtractor::extract(const std::vector<float>& iq,
 }
 
 } // namespace analysis
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

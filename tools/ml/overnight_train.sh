@@ -199,3 +199,9 @@ echo "Overnight training COMPLETE: $(ts)"
 echo "════════════════════════════════════════════"
 echo "Models deployed:"
 ls -lh /home/brendan/AnalysisApp/tools/ml/models/*.onnx 2>/dev/null
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================

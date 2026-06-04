@@ -439,3 +439,11 @@ std::vector<float> IqCollector::collect(au::QuantityD<au::Hertz> center_freq_hz,
 
 
 } // namespace analysis
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

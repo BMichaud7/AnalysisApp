@@ -344,3 +344,11 @@ TEST_F(FeatureExtractorTest, EmptyInputReturnsZeroFeatures)
     EXPECT_EQ(f.sample_count, 0);
     EXPECT_DOUBLE_EQ(f.snr_db, 0.0);
 }
+
+/*
+========================================================================
+End of file — OpenRFStack
+Subject to Personal Use License
+https://github.com/OpenRFStack
+========================================================================
+*/

@@ -227,3 +227,9 @@ def add_impairments(iq: np.ndarray,
         x = x + noise
 
     return x.astype(np.complex64)
+
+# ========================================================================
+# End of file — OpenRFStack
+# Subject to Personal Use License
+# https://github.com/OpenRFStack
+# ========================================================================
