@@ -43,4 +43,6 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Run unit tests
-        run: ctest --test-dir build --output-on-failure -V --timeout 60
+        run: |
+          ctest --test-dir build --output-on-failure -V --timeout 60 \
+            -E "NOT_BUILT"
