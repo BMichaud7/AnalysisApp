@@ -27,10 +27,10 @@ jobs:
       - name: Clone SdrSdk and SdrTaskApi (sibling dependencies)
         run: |
           git clone --depth 1 --branch "main/1.0" \
-            https://github.com/BMichaud7/SdrSdk.git \
+            https://github.com/OpenRFStack/SdrSdk.git \
             ../SdrSdk
           git clone --depth 1 --branch "main/1.0" \
-            https://github.com/BMichaud7/SdrTaskApi.git \
+            https://github.com/OpenRFStack/SdrTaskApi.git \
             ../SdrTaskApi
 
       - name: Configure
