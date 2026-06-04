@@ -8,7 +8,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v4
@@ -16,17 +16,13 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
-          # Try both package names — Ubuntu 24.04 may ship either
           sudo apt-get install -y \
             cmake ninja-build pkg-config git \
+            libqpid-proton-cpp12-dev \
             libtinyxml2-dev \
             libfmt-dev \
             libfftw3-dev \
             uuid-dev
-          sudo apt-get install -y libqpid-proton-cpp12-dev 2>/dev/null || \
-          sudo apt-get install -y libqpid-proton-dev qpid-proton-cpp-dev 2>/dev/null || \
-          sudo apt-get install -y libqpid-proton-cpp-dev 2>/dev/null || true
-          pkg-config --exists libqpid-proton-cpp && echo "proton found" || echo "proton not in pkg-config"
 
       - name: Clone SdrSdk and SdrTaskApi (sibling dependencies)
         run: |
