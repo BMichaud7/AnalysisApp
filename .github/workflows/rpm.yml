@@ -17,7 +17,8 @@ jobs:
           dnf install -y epel-release dnf-plugins-core
           dnf config-manager --set-enabled crb
           dnf makecache
-          dnf install -y cmake ninja-build gcc-c++ git pkg-config rpm-build rpmdevtools
+          dnf install -y cmake ninja-build gcc-c++ git pkg-config rpm-build ruby ruby-devel
+          gem install --no-document fpm
           dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
           dnf install -y gh --repo gh-cli
 
@@ -33,27 +34,35 @@ jobs:
 
       - name: Build
         run: |
-          cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=OFF
+          cmake -B build -S . -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DBUILD_TESTING=OFF
           cmake --build build --parallel
           DESTDIR=$PWD/install cmake --install build
 
-      - name: Package RPM
+      - name: Package RPM with fpm
         run: |
-          VERSION=$(grep -oP 'VERSION\s+\K\d+\.\d+\.\d+' CMakeLists.txt | head -1 || echo "2.5.0")
-          BROOT="$HOME/rpmbuild/BUILDROOT/sdr-analysis-${VERSION}-1.x86_64"
-          rpmdev-setuptree
-          mkdir -p "$BROOT/usr/bin"
+          VERSION=$(grep -oP 'project\(AnalysisApp.*VERSION\s+\K\d+\.\d+\.\d+' CMakeLists.txt | head -1 || echo "2.5.0")
           BIN=$(find install -name "sdr_analysis" -type f | head -1)
           [ -z "$BIN" ] && BIN=$(find build -name "sdr_analysis" -type f | head -1)
-          cp "$BIN" "$BROOT/usr/bin/"
-          cp packaging/sdr-analysis.spec "$HOME/rpmbuild/SPECS/"
-          rpmbuild -bb \
-            --define "_topdir $HOME/rpmbuild" \
-            --define "pkg_version ${VERSION}" \
-            --buildroot "$BROOT" \
-            "$HOME/rpmbuild/SPECS/sdr-analysis.spec"
+          if [ -z "$BIN" ]; then
+            echo "ERROR: sdr_analysis not found after build"
+            find install/ build/ -name "sdr_*" 2>/dev/null | head -20
+            exit 1
+          fi
+          echo "Found binary: $BIN"
           mkdir -p rpm_out
-          find "$HOME/rpmbuild/RPMS" -name "*.rpm" -exec cp {} rpm_out/ \;
+          fpm -s dir -t rpm \
+            -n sdr-analysis \
+            -v "${VERSION}" \
+            --iteration 1 \
+            --rpm-os linux \
+            --description "OpenRFStack sdr-analysis" \
+            --url "https://github.com/OpenRFStack/AnalysisApp" \
+            --license "Proprietary" \
+            --package rpm_out/ \
+            "${BIN}=/usr/bin/sdr_analysis"
           ls -lh rpm_out/
 
       - name: Upload to GitHub Release
