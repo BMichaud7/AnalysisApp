@@ -5,6 +5,9 @@ on:
     branches: ["main/1.0"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   rpm:
     runs-on: ubuntu-latest
@@ -17,7 +20,7 @@ jobs:
           dnf install -y epel-release dnf-plugins-core
           dnf config-manager --set-enabled crb
           dnf makecache
-          dnf install -y cmake ninja-build gcc-c++ git pkg-config rpm-build ruby ruby-devel
+          dnf install -y cmake ninja-build gcc-c++ git pkg-config ruby ruby-devel
           gem install --no-document fpm
           dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
           dnf install -y gh --repo gh-cli
