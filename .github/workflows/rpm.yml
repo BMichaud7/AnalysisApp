@@ -33,7 +33,7 @@ jobs:
 
       - name: Build
         run: |
-          cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DBUILD_TESTING=OFF
           cmake --build build --parallel
           DESTDIR=$PWD/install cmake --install build
 
@@ -43,7 +43,9 @@ jobs:
           BROOT="$HOME/rpmbuild/BUILDROOT/sdr-analysis-${VERSION}-1.x86_64"
           rpmdev-setuptree
           mkdir -p "$BROOT/usr/bin"
-          cp install/usr/bin/sdr_analysis "$BROOT/usr/bin/"
+          BIN=$(find install -name "sdr_analysis" -type f | head -1)
+          [ -z "$BIN" ] && BIN=$(find build -name "sdr_analysis" -type f | head -1)
+          cp "$BIN" "$BROOT/usr/bin/"
           cp packaging/sdr-analysis.spec "$HOME/rpmbuild/SPECS/"
           rpmbuild -bb \
             --define "_topdir $HOME/rpmbuild" \
