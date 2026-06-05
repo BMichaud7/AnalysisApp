@@ -20,7 +20,7 @@ jobs:
           dnf install -y epel-release dnf-plugins-core
           dnf config-manager --set-enabled crb
           dnf makecache
-          dnf install -y cmake ninja-build gcc-c++ git pkg-config ruby ruby-devel
+          dnf install -y cmake ninja-build gcc-c++ git pkg-config ruby ruby-devel rpm-build
           gem install --no-document fpm
           dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
           dnf install -y gh --repo gh-cli
