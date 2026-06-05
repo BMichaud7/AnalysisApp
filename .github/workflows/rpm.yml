@@ -22,7 +22,7 @@ jobs:
           dnf install -y gh --repo gh-cli
 
       - name: Install app dependencies
-        run: dnf install -y qpid-proton-cpp-devel tinyxml2-devel fftw-devel spdlog-devel fmt-devel libpqxx-devel || true
+        run: dnf install -y qpid-proton-cpp-devel tinyxml2-devel fftw-devel spdlog-devel fmt-devel
 
       - uses: actions/checkout@v4
 
