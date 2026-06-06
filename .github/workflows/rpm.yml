@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   rpm:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
     container:
       image: rockylinux:9
 
