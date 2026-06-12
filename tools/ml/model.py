@@ -101,6 +101,23 @@ class RadioCNN(nn.Module):
 
 # ── RadioResNet (residual, higher accuracy) ───────────────────────────────────
 
+class _SEBlock1d(nn.Module):
+    """Squeeze-and-Excitation channel attention — cheap but effective."""
+    def __init__(self, channels: int, reduction: int = 8):
+        super().__init__()
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(channels, max(channels // reduction, 4)),
+            nn.ReLU(inplace=True),
+            nn.Linear(max(channels // reduction, 4), channels),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self.se(x).unsqueeze(-1)
+
+
 class _ResBlock1d(nn.Module):
     def __init__(self, channels: int, kernel_size: int = 3, dropout: float = 0.1):
         super().__init__()
@@ -112,11 +129,26 @@ class _ResBlock1d(nn.Module):
             nn.Conv1d(channels, channels, kernel_size, padding=pad),
             nn.BatchNorm1d(channels),
         )
+        self.se      = _SEBlock1d(channels)
         self.dropout = nn.Dropout(dropout)
         self.relu    = nn.ReLU(inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.relu(self.dropout(self.block(x)) + x)
+        return self.relu(self.se(self.dropout(self.block(x))) + x)
+
+
+class _MultiScaleStem(nn.Module):
+    """Parallel convolutions at three kernel sizes, concatenated along channels."""
+    def __init__(self, channels: int):
+        super().__init__()
+        c = channels // 3
+        r = channels - 2 * c   # absorb rounding remainder in the wide branch
+        self.b3  = nn.Conv1d(2, c, kernel_size=3,  padding=1)
+        self.b7  = nn.Conv1d(2, c, kernel_size=7,  padding=3)
+        self.b15 = nn.Conv1d(2, r, kernel_size=15, padding=7)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.b3(x), self.b7(x), self.b15(x)], dim=1)
 
 
 class RadioResNet(nn.Module):
@@ -127,10 +159,10 @@ class RadioResNet(nn.Module):
     """
 
     def __init__(self, num_classes: int = 11, input_len: int = 128,
-                 channels: int = 128, n_blocks: int = 8):
+                 channels: int = 128, n_blocks: int = 12):
         super().__init__()
         self.stem = nn.Sequential(
-            nn.Conv1d(2, channels, kernel_size=7, padding=3),
+            _MultiScaleStem(channels),
             nn.BatchNorm1d(channels),
             nn.ReLU(inplace=True),
         )

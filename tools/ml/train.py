@@ -191,6 +191,99 @@ def mixup_loss(crit, logits, y_a, y_b, lam):
     return lam * crit(logits, y_a) + (1 - lam) * crit(logits, y_b)
 
 
+# ── Online channel augmentation ───────────────────────────────────────────────
+
+class IqAugment(nn.Module):
+    """
+    GPU-vectorized channel impairments applied per-batch during training.
+    No CFO — CFO ±3% SR (±6000 Hz) destroyed narrowband classes (RTTY ±85 Hz,
+    NAVTEX ±150 Hz, DSC ±400 Hz) that the generator already impairs at ±600 Hz.
+    Augments: phase rotation, IQ imbalance, real hardware noise (or AWGN fallback).
+
+    If noise_bank is provided (shape (M, 2, L) float32 from capture_noise.py),
+    real PlutoSDR noise segments replace synthetic AWGN.  This forces the model
+    to learn features that survive actual hardware noise characteristics instead
+    of idealised Gaussian noise.
+    """
+    def __init__(self,
+                 iq_imbal:   float = 0.04,
+                 snr_lo_db:  float = 5.0,
+                 snr_hi_db:  float = 40.0,
+                 p:          float = 0.85,
+                 noise_bank: torch.Tensor | None = None):
+        super().__init__()
+        self.iq_imbal = iq_imbal
+        self.snr_lo   = snr_lo_db
+        self.snr_hi   = snr_hi_db
+        self.p        = p
+
+        if noise_bank is not None:
+            # Store as complex (M, L) so GPU indexing is fast
+            nb_cplx = torch.complex(noise_bank[:, 0], noise_bank[:, 1])
+            self.register_buffer("noise_bank", nb_cplx)
+            print(f"  IqAugment: real noise bank loaded  "
+                  f"{len(noise_bank):,} segments × {noise_bank.shape[-1]} samples")
+        else:
+            self.noise_bank = None
+
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        if not self.training:
+            return X
+        B, _, N = X.shape
+        device  = X.device
+
+        iq = torch.complex(X[:, 0], X[:, 1])  # (B, N)
+
+        # Random phase rotation — safe for all classes
+        phase = (torch.rand(B, 1, device=device) * 2 - 1) * math.pi
+        iq = iq * torch.polar(torch.ones(B, 1, device=device), phase)
+
+        # IQ imbalance: amplitude α and phase φ mismatch (small-angle approx)
+        alpha = 1.0 + (torch.rand(B, 1, device=device) * 2 - 1) * self.iq_imbal
+        phi   = (torch.rand(B, 1, device=device) * 2 - 1) * self.iq_imbal
+        I_new = iq.real * alpha
+        Q_new = -iq.real * phi + iq.imag
+        iq    = torch.complex(I_new, Q_new)
+
+        # Noise at random per-sample SNR
+        snr_db  = (torch.rand(B, 1, device=device) * (self.snr_hi - self.snr_lo)
+                   + self.snr_lo)
+        snr_lin = 10.0 ** (snr_db / 10.0)
+        sig_pwr = iq.abs().pow(2).mean(dim=1, keepdim=True)
+        n_pwr   = sig_pwr / snr_lin.clamp(min=1e-4)
+
+        if self.noise_bank is not None:
+            # Sample random real-noise segments from the bank, scale to target power
+            bank = self.noise_bank.to(device)
+            M    = bank.shape[0]
+            L    = bank.shape[1]
+            idx  = torch.randint(0, M, (B,), device=device)
+            segs = bank[idx]                                    # (B, L)
+            if L > N:
+                off  = torch.randint(0, L - N, (B,), device=device)
+                segs = torch.stack([segs[i, off[i]: off[i] + N] for i in range(B)])
+            elif L < N:
+                # tile — rare if window sizes match
+                repeats = (N + L - 1) // L
+                segs    = segs.repeat(1, repeats)[:, :N]
+            raw_pwr = segs.abs().pow(2).mean(dim=1, keepdim=True).clamp(min=1e-12)
+            noise   = segs * (n_pwr / raw_pwr).sqrt()
+        else:
+            noise = ((torch.randn(B, N, device=device)
+                      + 1j * torch.randn(B, N, device=device))
+                     * (n_pwr / 2).sqrt())
+
+        iq += noise
+
+        # Re-normalise to unit peak
+        scale = iq.abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
+        iq    = iq / scale
+
+        X_aug = torch.stack([iq.real, iq.imag], dim=1)
+        mask  = (torch.rand(B, device=device) < self.p).view(B, 1, 1)
+        return torch.where(mask, X_aug, X)
+
+
 # ── Training loop ─────────────────────────────────────────────────────────────
 
 def train(model:          nn.Module,
@@ -205,14 +298,16 @@ def train(model:          nn.Module,
           class_weights:  torch.Tensor | None = None,
           focal_gamma:    float | None = None,
           label_smoothing: float = 0.05,
-          sgdr_t0:        int   = 0) -> nn.Module:
+          sgdr_t0:        int   = 0,
+          augment:        IqAugment | None = None) -> nn.Module:
     """
     Train model with:
       - AdamW optimiser, gradient clipping
       - Linear warmup + cosine annealing (or SGDR with sgdr_t0 restart period)
       - Optional focal loss + label smoothing
+      - Online IQ channel augmentation (CFO, IQ imbalance, AWGN) if augment given
       - Mixup augmentation after warmup
-      - Per-class val_acc tracking; saves best checkpoint
+      - Per-class val_acc tracking; checkpoint on composite score (val + min_class)
     """
     opt = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
@@ -236,15 +331,26 @@ def train(model:          nn.Module,
     else:
         crit = nn.CrossEntropyLoss(weight=w, label_smoothing=label_smoothing)
         print(f"  Loss: CrossEntropy(label_smoothing={label_smoothing})")
-    best_acc    = 0.0
+    best_score  = 0.0   # composite: 0.7*val_acc + 0.3*min_class
     best_state  = None
-    num_classes = next(iter(loader))[1].max().item() + 1
+    # Use the model's actual output dimension, not the first-batch max label.
+    # The first-batch approach can under-count when rare classes don't appear
+    # in batch 0 (especially with WeightedRandomSampler boosting other classes).
+    num_classes = next(p for p in reversed(list(model.parameters()))
+                       if p.ndim == 2).shape[0]
+
+    if augment is not None:
+        augment = augment.to(device).train()
 
     for epoch in range(1, epochs + 1):
         model.train()
+        if augment is not None:
+            augment.train()
         train_loss = 0.0
         for X_b, y_b in tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=False):
             X_b, y_b = X_b.to(device), y_b.to(device)
+            if augment is not None:
+                X_b = augment(X_b)
             opt.zero_grad()
             if use_mixup and epoch > warmup_epochs:
                 X_b, y_a, y_b2, lam = mixup_batch(X_b, y_b)
@@ -262,6 +368,8 @@ def train(model:          nn.Module,
         sched.step()
 
         model.eval()
+        if augment is not None:
+            augment.eval()
         per_correct = torch.zeros(num_classes)
         per_total   = torch.zeros(num_classes)
         with torch.no_grad():
@@ -278,17 +386,18 @@ def train(model:          nn.Module,
         val_acc  = per_acc.mean().item()
         min_acc  = per_acc.min().item()
         cur_lr   = opt.param_groups[0]["lr"]
+        score    = 0.7 * val_acc + 0.3 * min_acc
         print(f"  Epoch {epoch:3d}  loss={train_loss:.4f}  val_acc={val_acc:.3f}  "
-              f"min_class={min_acc:.3f}  lr={cur_lr:.2e}")
+              f"min_class={min_acc:.3f}  score={score:.3f}  lr={cur_lr:.2e}")
 
-        # Save on improvement to mean per-class validation accuracy
-        if val_acc > best_acc:
-            best_acc   = val_acc
+        # Checkpoint on composite score so we never sacrifice the worst class
+        if score > best_score:
+            best_score = score
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
             if ckpt_path:
                 torch.save(best_state, ckpt_path)
 
-    print(f"\nBest val accuracy: {best_acc:.3f}  (min_class this epoch: {min_acc:.3f})")
+    print(f"\nBest composite score: {best_score:.3f}")
     if best_state:
         model.load_state_dict(best_state)
     return model
@@ -348,9 +457,9 @@ def main() -> None:
                     choices=["cnn","resnet","fusion"],
                     help="Model architecture (default resnet)")
     ap.add_argument("--channels",  type=int,   default=128,
-                    help="ResNet channel width (default 128; try 256 or 512 for higher accuracy)")
-    ap.add_argument("--n-blocks",  type=int,   default=8,
-                    help="Number of residual blocks (default 8; try 10-12 for larger model)")
+                    help="ResNet channel width (default 128)")
+    ap.add_argument("--n-blocks",  type=int,   default=12,
+                    help="Number of residual blocks (default 12)")
     ap.add_argument("--epochs",  type=int,   default=50)
     ap.add_argument("--batch",   type=int,   default=256)
     ap.add_argument("--lr",      type=float, default=1e-3)
@@ -364,8 +473,25 @@ def main() -> None:
                     help="Label smoothing ε for loss function (default 0.05).")
     ap.add_argument("--sgdr-t0",   type=int,   default=0, metavar="EPOCHS",
                     help="Cosine annealing warm restart period T_0 (0 = disabled, use single decay).")
+    ap.add_argument("--boost-hard", type=float, default=None, metavar="FACTOR",
+                    help="Oversample PSK/QAM hard classes by FACTOR via WeightedRandomSampler.")
     ap.add_argument("--boost-qam", type=float, default=None, metavar="FACTOR",
-                    help="Oversample QAM* classes by this factor via WeightedRandomSampler.")
+                    help="(deprecated) Use --boost-hard instead.")
+    ap.add_argument("--augment",   action="store_true",
+                    help="Apply online IQ channel augmentation during training "
+                         "(phase, IQ imbalance, AWGN). Strongly recommended.")
+    ap.add_argument("--no-mixup",  action="store_true",
+                    help="Disable mixup. For raw IQ, linearly superimposing two "
+                         "different modulations' samples (with a blended label) "
+                         "can confuse the classifier rather than regularize it.")
+    ap.add_argument("--val-npz",   default=None, metavar="FILE",
+                    help="External NPZ to use as the validation set (e.g. the holdout). "
+                         "Checkpoints will be saved on best performance against this set, "
+                         "so the model actually optimises for the right distribution.")
+    ap.add_argument("--noise-npz", default=None, metavar="FILE",
+                    help="NPZ of real captured noise windows from capture_noise.py. "
+                         "When --augment is also set, replaces synthetic AWGN with real "
+                         "PlutoSDR hardware noise during IQ augmentation.")
     args = ap.parse_args()
 
     device = torch.device(
@@ -382,32 +508,67 @@ def main() -> None:
     print(f"  Samples: {len(X)}  Input length: {input_len}  Classes: {num_classes}")
 
     # ── Split ─────────────────────────────────────────────────────────────────
-    dataset  = TensorDataset(X, y)
-    n_val    = int(len(dataset) * 0.15)
-    n_test   = int(len(dataset) * 0.15)
-    n_train  = len(dataset) - n_val - n_test
-    train_ds, val_ds, test_ds = random_split(
-        dataset, [n_train, n_val, n_test],
-        generator=torch.Generator().manual_seed(42),
-    )
+    dataset = TensorDataset(X, y)
     import torch as _torch
     _use_gpu = args.cuda and _torch.cuda.is_available()
     kw = dict(batch_size=args.batch,
               num_workers=4 if _use_gpu else 0,
               pin_memory=_use_gpu)
 
-    if args.boost_qam and args.boost_qam > 1.0:
-        qam_idx = {i for i, n in enumerate(class_names) if "QAM" in n}
+    if args.val_npz:
+        # Use the external holdout as the validation set so checkpoints are
+        # optimised for the actual target distribution, not the training split.
+        print(f"  Using external val set: {args.val_npz}")
+        vd  = np.load(args.val_npz)
+        vX  = torch.from_numpy(vd["X"]).float()
+        vy_raw = vd["y"]
+        # Remap holdout labels to match this run's class_names order
+        h_classes = list(vd["classes"])
+        label_map = {h_classes[i]: class_names.index(h_classes[i])
+                     for i in range(len(h_classes)) if h_classes[i] in class_names}
+        vy = torch.tensor([label_map.get(h_classes[int(l)], -1) for l in vy_raw],
+                          dtype=torch.long)
+        keep = vy >= 0
+        vX, vy = vX[keep], vy[keep]
+        val_ds   = TensorDataset(vX, vy)
+        # Use all training data for training (no split wasted on val)
+        n_test   = int(len(dataset) * 0.10)
+        n_train  = len(dataset) - n_test
+        train_ds, test_ds = random_split(
+            dataset, [n_train, n_test],
+            generator=torch.Generator().manual_seed(42),
+        )
+    else:
+        n_val   = int(len(dataset) * 0.15)
+        n_test  = int(len(dataset) * 0.15)
+        n_train = len(dataset) - n_val - n_test
+        train_ds, val_ds, test_ds = random_split(
+            dataset, [n_train, n_val, n_test],
+            generator=torch.Generator().manual_seed(42),
+        )
+
+    # Hard-class oversampling — boosts PSK variants, mid-order QAM, and other
+    # known weak classes (0% on holdout) via WeightedRandomSampler.
+    HARD_CLASSES = {
+        '8PSK', '16PSK', '32PSK', 'PSK31', 'P25_PHASE2',
+        'QAM16', 'QAM32', 'QAM64',
+        'AM_DSB', 'DSTAR', 'TETRA', 'NAVTEX', 'RTTY',
+        'P25_C4FM', 'NXDN', 'DTMF', 'GFSK', 'FSK', 'TONE', '4FSK', '8FSK',
+    }
+    boost_factor = args.boost_hard or args.boost_qam  # accept either flag
+    if boost_factor and boost_factor > 1.0:
+        hard_idx     = {i for i, n in enumerate(class_names) if n in HARD_CLASSES
+                        or "QAM" in n or "PSK" in n}
         train_labels = y[train_ds.indices]
         sample_w = torch.where(
-            torch.tensor([int(l) in qam_idx for l in train_labels]),
-            torch.tensor(float(args.boost_qam)),
+            torch.tensor([int(l) in hard_idx for l in train_labels]),
+            torch.tensor(float(boost_factor)),
             torch.ones(len(train_ds)),
         )
         sampler = WeightedRandomSampler(sample_w, len(train_ds), replacement=True)
         train_loader = DataLoader(train_ds, sampler=sampler, **kw)
-        print(f"  QAM boost ×{args.boost_qam:.1f} via WeightedRandomSampler "
-              f"(classes: {sorted(class_names[i] for i in qam_idx)})")
+        boosted = sorted(class_names[i] for i in hard_idx)
+        print(f"  Hard-class boost ×{boost_factor:.1f}: {boosted}")
     else:
         train_loader = DataLoader(train_ds, shuffle=True, **kw)
 
@@ -453,14 +614,21 @@ def main() -> None:
         print(f"    {class_names[i]:15s} {weights[i]:.2f}x  ({int(counts[i])} samples)")
 
     # ── Train ─────────────────────────────────────────────────────────────────
+    noise_bank = None
+    if args.augment and args.noise_npz:
+        nd = np.load(args.noise_npz)
+        noise_bank = torch.from_numpy(nd["X"]).float()  # (M, 2, L)
+        print(f"  Real noise bank: {len(noise_bank):,} segments from {args.noise_npz}")
+    augment = IqAugment(noise_bank=noise_bank) if args.augment else None
     ckpt_path = args.out.replace(".onnx", ".best.pt")
     model = train(model, train_loader, val_loader, device,
                   epochs=args.epochs, lr=args.lr,
-                  use_mixup=True, warmup_epochs=min(5, args.epochs // 10),
+                  use_mixup=not args.no_mixup, warmup_epochs=min(8, args.epochs // 10),
                   ckpt_path=ckpt_path, class_weights=weights,
                   focal_gamma=args.focal,
                   label_smoothing=args.label_smoothing,
-                  sgdr_t0=args.sgdr_t0)
+                  sgdr_t0=args.sgdr_t0,
+                  augment=augment)
 
     # ── Test + report ─────────────────────────────────────────────────────────
     print("\n── Test Set Evaluation ──")

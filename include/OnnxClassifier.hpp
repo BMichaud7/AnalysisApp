@@ -50,10 +50,12 @@ namespace analysis {
  *
  * Loaded from the @c \<onnx\> or @c \<onnx_low_snr\> XML block in analysis.xml.
  *
- * @par Current model — 47-class RadioResNet (val_acc = 0.748, best epoch 38/40)
- * - Input:  @c (1, 2, 512) — 2-channel real (I,Q), 512 complex samples
+ * @par Current model — amr_cnn_v6_47class.onnx, 47-class RadioResNet (holdout accuracy = 0.694)
+ * - Input:  @c (1, 2, 1024) — 2-channel real (I,Q), 1024 complex samples
  * - Output: @c (1, 47) — softmax probability per class
- * - Training: 1.06M samples, focal loss γ=2, GPU, 40 epochs
+ * - Training: fine-tuned from v5, focal loss γ=2, label smoothing 0.10, GPU,
+ *   no-mixup, hard-class oversampling. See SdrDocs accuracy.html for the full
+ *   per-class / per-SNR breakdown.
  *
  * @par Execution provider selection
  * TensorRT (if @c use_tensorrt=true) → CUDA (if @c use_gpu=true) → CPU

@@ -99,10 +99,10 @@
     -->
     <onnx>
       <!-- Path to the ONNX model file.  Relative paths resolve from CWD. -->
-      <model_path>/opt/models/amr_cnn_47class.onnx</model_path>
+      <model_path>/opt/models/amr_cnn_v6_47class.onnx</model_path>
 
       <!-- Path to the JSON class-index → label mapping file. -->
-      <classes_path>/opt/models/amr_cnn_47class.classes.json</classes_path>
+      <classes_path>/opt/models/amr_cnn_v6_47class.classes.json</classes_path>
 
       <!-- Try CUDA execution provider; fall back to CPU if unavailable. -->
       <use_gpu>true</use_gpu>

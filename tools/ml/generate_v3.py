@@ -63,7 +63,7 @@ def _rrc(sps: int, rolloff: float = 0.35, span: int = 10) -> np.ndarray:
     for i, ti in enumerate(t):
         if ti == 0.0:
             h[i] = (1 - alpha + 4 * alpha / math.pi)
-        elif abs(ti) == T / (2 * alpha):
+        elif abs(ti) == T / (4 * alpha):  # denominator zero: (4α·t/T)²=1
             h[i] = (alpha / math.sqrt(2)) * (
                 (1 + 2 / math.pi) * math.sin(math.pi / (4 * alpha))
                 + (1 - 2 / math.pi) * math.cos(math.pi / (4 * alpha))
@@ -119,15 +119,19 @@ def _constellation(M: int, kind: str = "qam") -> np.ndarray:
         return (np.cos(angles) + 1j * np.sin(angles)).astype(np.complex64)
     # Gray-coded rectangular QAM
     side = int(math.sqrt(M))
-    if side * side == M:  # square QAM
+    if side * side == M:  # square QAM (16, 64, 256, ...)
         levels = np.arange(-(side - 1), side, 2, dtype=float)
         pts = np.array([x + 1j * y for x in levels for y in levels], dtype=np.complex64)
     else:  # cross QAM (QAM32)
-        # Approximate: use a larger square and trim corners
+        # Standard cross-QAM32: 6×6 grid with exactly the 4 true corners removed.
+        # Bug fixed: the old threshold (side2*0.9 = 5.4) also cut near-corner points
+        # at |±5±3j| = 5.83, yielding only 24 pts instead of the correct 32.
         side2 = int(math.sqrt(M * 1.5))
         levels = np.arange(-(side2 - 1), side2, 2, dtype=float)
-        pts = np.array([x + 1j * y for x in levels for y in levels], dtype=np.complex64)
-        pts = pts[np.abs(pts) <= side2 * 0.9][:M]
+        max_lv = float(levels[-1])
+        pts = np.array([x + 1j * y for x in levels for y in levels
+                        if not (abs(x) == max_lv and abs(y) == max_lv)],
+                       dtype=np.complex64)
     pts /= np.sqrt(np.mean(np.abs(pts) ** 2))
     return pts.astype(np.complex64)
 
@@ -224,12 +228,27 @@ def _fm_nb(n: int, rng: np.random.Generator) -> np.ndarray:
 
 
 def _am_dsb(n: int, rng: np.random.Generator) -> np.ndarray:
+    """AM-DSB: carrier + symmetric sidebands.
+
+    Previous bug: used a scalar phase exp(j*phase) — both I and Q were just
+    scaled versions of the envelope, so AM_DSB was indistinguishable from
+    AM_DSB_SC (both looked like real-valued noise).
+
+    Fix: modulate onto a time-varying carrier at a random frequency offset so
+    the model sees the symmetric sideband structure.  After baseband conversion
+    the signal is (1 + m(t)) * exp(j*2π*fc*t) — carrier at fc with audio
+    sidebands at fc ± audio_bw.  AM_DSB_SC is just m(t) (no carrier term),
+    giving a distinctly different spectral and envelope shape.
+    """
     audio = rng.standard_normal(n).astype(np.float32)
     depth = rng.uniform(0.5, 0.95)
     env   = (1.0 + depth * audio / max(np.abs(audio).max(), 1e-9)).astype(np.float32)
     env   = np.clip(env, 0.0, None)
-    phase = rng.uniform(0, 2 * math.pi)
-    return _norm((env * np.exp(1j * phase)).astype(np.complex64))
+    # Carrier at random offset — exposes the DSB symmetric sideband structure
+    carrier_hz = rng.uniform(0.03, 0.35) * SR
+    t = np.arange(n) / SR
+    carrier = np.exp(1j * 2 * math.pi * carrier_hz * t).astype(np.complex64)
+    return _norm(env.astype(np.complex64) * carrier)
 
 
 def _am_dsb_sc(n: int, rng: np.random.Generator) -> np.ndarray:
@@ -327,12 +346,12 @@ def _dmr(n: int, rng: np.random.Generator) -> np.ndarray:
         syms[:12] = [1, 3, 1, 1, 3, 3, 1, 3, 1, 3, 3, 3]
     freq_seq = np.repeat([dev[s] for s in syms], sps)[:n].astype(np.float64)
     phase = np.cumsum(2 * math.pi * freq_seq)
-    # DMR is TDMA — add burst envelope (on/off pattern for 2 slots)
-    burst_period = int(SR / 50)   # 50 Hz burst rate
+    # DMR is TDMA — burst envelope visible in every window (period = n//2 ensures one cycle)
+    burst_period = n // 2
     env = np.ones(n, dtype=np.float32)
     for start in range(0, n, burst_period):
-        end = min(start + burst_period // 2, n)
-        env[end:min(start + burst_period, n)] = 0.05  # guard interval
+        end = min(start + burst_period * 3 // 4, n)
+        env[end:min(start + burst_period, n)] = 0.05  # 25% guard interval
     return _norm((np.exp(1j * phase) * env).astype(np.complex64))
 
 
@@ -480,49 +499,82 @@ def _dtmf(n: int, rng: np.random.Generator) -> np.ndarray:
 
 
 def _eas_same(n: int, rng: np.random.Generator) -> np.ndarray:
-    """EAS/SAME: AFSK 520 baud, mark=2083 Hz, space=1563 Hz over AM."""
-    t = np.arange(n) / SR
+    """EAS/SAME: AFSK 520 baud, mark=2083 Hz, space=1563 Hz over AM.
+
+    sps=384 means transitions are visible in 1024-sample windows (2.67 symbols).
+    Generate a long alternating-tone sequence and take a random slice so the
+    model sees both mark and space tones, not always the same preamble start.
+    The distinctive cue is the specific subcarrier frequencies (2083/1563 Hz)
+    riding on an AM carrier — different from ACARS (2400/1200 Hz) and DTMF.
+    """
     baud = 520.833
     mark_hz, space_hz = 2083.3, 1562.5
-    sps = max(4, int(SR / baud))
-    n_syms = math.ceil(n / sps) + 5
-    syms = rng.integers(0, 2, n_syms)
-    # Preamble: 16×0xAB = alternating 1/0
-    pre = [1 if (i//4)%2==0 else 0 for i in range(min(64,n_syms))]
-    syms[:len(pre)] = pre
+    sps = max(4, int(SR / baud))          # 384 samples/symbol
+    n_syms = 30                            # 30 * 384 = 11520 >> 1024
+    # Alternating preamble pattern (0xAB repeated)
+    syms = np.array([1 if (i // 4) % 2 == 0 else 0 for i in range(n_syms)],
+                    dtype=np.int64)
+    # Build full-length audio and take a random slice
+    total = n_syms * sps
+    audio = np.zeros(total, np.float32)
     audio_phase = 0.0
-    audio = np.zeros(n, np.float32)
-    for i in range(n):
-        tone = mark_hz if syms[min(i//sps,n_syms-1)] else space_hz
-        audio_phase += 2*math.pi*tone/SR
+    for i in range(total):
+        tone = mark_hz if syms[i // sps] else space_hz
+        audio_phase += 2 * math.pi * tone / SR
         audio[i] = math.sin(audio_phase)
-    carrier_hz = rng.uniform(0.1, 0.25) * SR
-    carrier = np.sin(2*math.pi*carrier_hz*t).astype(np.float32)
-    return _norm(((1.0 + 0.85*audio)*carrier).astype(np.complex64))
+    off = int(rng.integers(0, total - n)) if total > n else 0
+    audio = audio[off:off + n]
+    t = np.arange(n) / SR
+    carrier_hz = rng.uniform(0.05, 0.15) * SR   # narrower range, distinct from ACARS
+    carrier = np.sin(2 * math.pi * carrier_hz * t).astype(np.float32)
+    return _norm(((1.0 + 0.85 * audio) * carrier).astype(np.complex64))
 
 
-def _rtty(n: int, rng: np.random.Generator) -> np.ndarray:
-    """RTTY: 2-FSK 45.45 baud, ±85 Hz (170 Hz shift). Baudot ITA-2."""
-    sps = max(4, int(SR / 45.45))
+def _rtty(n: int, rng: np.random.Generator, sps: int = 8) -> np.ndarray:
+    """RTTY: 2-FSK, ±85 Hz shift at 45.45 baud (Baudot ITA-2).
+
+    IMPORTANT: sps must be large enough for meaningful phase accumulation.
+    At SR=200kHz the real RTTY baud rate of 45.45 Bd → sps=4400.  At sps=4-12
+    from _gen_one, dev=85/SR=0.000425 gives only ~0.01-0.03 rad/symbol — the
+    signal is effectively DC and the model cannot learn the RTTY feature.
+
+    Fix: ignore the passed sps and always use the real baud rate.  This gives
+    ~1.87 phase cycles per symbol (clearly FSK).  Generate a long sequence and
+    take a random slice so transitions are sometimes visible in 1024-sample windows.
+    The model learns "slow narrow-deviation 2-FSK" as the RTTY cue.
+    """
+    real_sps = max(4, int(SR / 45.45))   # ≈ 4400
     dev = 85.0 / SR
-    n_syms = math.ceil(n / sps) + 5
+    n_syms = 12  # 12 * 4400 = 52800 samples >> n
     syms = rng.integers(0, 2, n_syms)
-    freq_seq = np.repeat([dev if s else -dev for s in syms], sps)[:n]
-    phase = np.cumsum(2*math.pi*freq_seq)
-    return _norm(np.exp(1j*phase).astype(np.complex64))
+    freq_seq = np.repeat([dev if s else -dev for s in syms], real_sps)
+    off = int(rng.integers(0, len(freq_seq) - n)) if len(freq_seq) > n else 0
+    phase = np.cumsum(2 * math.pi * freq_seq[off:off + n])
+    return _norm(np.exp(1j * phase).astype(np.complex64))
 
 
 def _p25_phase2(n: int, rng: np.random.Generator) -> np.ndarray:
-    """P25 Phase 2: π/4-DQPSK, 12000 sym/s, 12.5 kHz channel."""
-    sps = max(4, int(SR / 12000.0))
-    const = _constellation(4, "psk")  # use QPSK constellation
-    syms = rng.choice(const, math.ceil(n/sps)+20)
-    # Apply π/4 rotation per symbol
-    for i in range(1, len(syms)):
-        syms[i] *= np.exp(1j * math.pi / 4)
+    """P25 Phase 2: π/4-DQPSK, 12000 sym/s, 12.5 kHz channel.
+
+    π/4-DQPSK: each symbol TRANSITION is one of {±π/4, ±3π/4}; the transmitted
+    phase is the accumulated sum.  The constellation alternates between two
+    offset QPSK grids (0°/90°/180°/270°) and (45°/135°/225°/315°), which gives
+    zero-crossing-free envelope variation — a key waveform discriminator vs QPSK.
+
+    Previous bug: applied exp(j*π/4) to each symbol independently (non-cumulative),
+    producing plain QPSK rotated 45° — identical to QPSK from the model's view.
+    """
+    sps = max(4, int(SR / 12000.0))   # ≈ 16 samples/sym at 200 kHz
+    # Phase increments per the ANSI/TIA-102 spec (dibits map to ±π/4, ±3π/4)
+    increments = np.array([math.pi/4, 3*math.pi/4, -3*math.pi/4, -math.pi/4],
+                          dtype=float)
+    n_syms = math.ceil(n / sps) + 20
+    trans = rng.integers(0, 4, n_syms)
+    phases = np.cumsum(increments[trans])
+    syms = np.exp(1j * phases).astype(np.complex64)
     iq = _apply_rrc(syms, sps, 0.2)
-    delay = (len(_rrc(sps, 0.2))-1)//2
-    return _norm(iq[delay:delay+n])
+    delay = (len(_rrc(sps, 0.2)) - 1) // 2
+    return _norm(iq[delay:delay + n])
 
 
 def _adsb(n: int, rng: np.random.Generator) -> np.ndarray:
@@ -563,17 +615,20 @@ def _dsc(n: int, rng: np.random.Generator) -> np.ndarray:
 
 
 def _navtex(n: int, rng: np.random.Generator) -> np.ndarray:
-    """NAVTEX: FSK 100 baud, ±150 Hz, SITOR-B, maritime safety 518 kHz."""
-    sps = max(4, int(SR / 100.0))
+    """NAVTEX: FSK 100 baud, ±150 Hz, SITOR-B, maritime safety 518 kHz.
+
+    sps=2000 means each symbol spans 2000 samples — longer than the 1024-sample
+    window. Generate a long sequence and take a random slice so both mark/space
+    and transitions are visible in training windows, not just the initial tone.
+    """
+    sps = max(4, int(SR / 100.0))   # 2000 samples/symbol
     dev = 150.0 / SR
-    n_syms = math.ceil(n / sps) + 5
+    n_syms = 12  # 12 * 2000 = 24000 samples >> n
     syms = rng.integers(0, 2, n_syms)
-    # NAVTEX starts with ZCZC — encode as alternating bits
-    pre = [1,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0]
-    syms[:min(len(pre),n_syms)] = pre[:min(len(pre),n_syms)]
-    freq_seq = np.repeat([dev if s else -dev for s in syms], sps)[:n]
-    phase = np.cumsum(2*math.pi*freq_seq)
-    return _norm(np.exp(1j*phase).astype(np.complex64))
+    freq_seq = np.repeat([dev if s else -dev for s in syms], sps)
+    off = int(rng.integers(0, len(freq_seq) - n)) if len(freq_seq) > n else 0
+    phase = np.cumsum(2 * math.pi * freq_seq[off:off + n])
+    return _norm(np.exp(1j * phase).astype(np.complex64))
 
 
 def _vdl2(n: int, rng: np.random.Generator) -> np.ndarray:
@@ -586,15 +641,12 @@ def _vdl2(n: int, rng: np.random.Generator) -> np.ndarray:
     return _norm(iq[delay:delay+n])
 
 
-def _psk31(n: int, rng: np.random.Generator) -> np.ndarray:
-    """PSK31: BPSK 31.25 baud, extremely narrow ~31 Hz BW. HF amateur."""
-    sps = max(4, int(SR / 31.25))
+def _psk31(n: int, rng: np.random.Generator, sps: int = 8) -> np.ndarray:
+    """PSK31: BPSK with very narrow RRC rolloff (0.05–0.12) — the narrow
+    spectral footprint is its only distinguishing feature from plain BPSK."""
     const = np.array([1.0+0j, -1.0+0j], dtype=np.complex64)  # BPSK
-    n_syms = math.ceil(n / sps) + 5
-    syms = rng.choice(const, n_syms)
-    iq = _apply_rrc(syms, sps, 0.2)
-    delay = (len(_rrc(sps, 0.2))-1)//2
-    return _norm(iq[delay:delay+n])
+    ro = float(rng.uniform(0.05, 0.12))   # very narrow — key discriminator
+    return _digital(const, n, rng, sps, rolloff=ro)
 
 
 # ── Class registry ────────────────────────────────────────────────────────────
@@ -646,11 +698,26 @@ def _gen_one(cls: str, n: int, rng: np.random.Generator) -> np.ndarray:
     if cls == "FSK":       return _fsk(2,   n, rng, sps)
     if cls == "4FSK":      return _fsk(4,   n, rng, sps)
     if cls == "8FSK":      return _fsk(8,   n, rng, max(sps, 6))
-    if cls == "MSK":       return _fsk(2,   n, rng, sps, SR * 0.025)
+    if cls == "MSK":       return _fsk(2,   n, rng, sps, SR / (4 * sps))  # MI=0.5: dev=baud/4
     if cls == "GFSK":      return _gfsk(2,  n, rng, sps, SR * 0.05, float(rng.uniform(0.3, 0.6)))
-    if cls == "GMSK":      return _gfsk(2,  n, rng, sps, SR * 0.025, 0.3)
-    if cls in PSK_CONSTS:  return _digital(PSK_CONSTS[cls], n, rng, sps, ro)
-    if cls in QAM_CONSTS:  return _digital(QAM_CONSTS[cls], n, rng, max(sps, 5), ro)
+    if cls == "GMSK":      return _gfsk(2,  n, rng, sps, SR / (4 * sps), 0.3)  # MI=0.5, BT=0.3
+    # Per-order PSK rolloff gives spectral BW cue — higher order → tighter rolloff (spec-efficient)
+    if cls == "BPSK":      return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.30, 0.50)))
+    if cls == "QPSK":      return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.25, 0.45)))
+    if cls == "8PSK":      return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.18, 0.35)))
+    if cls == "16PSK":     return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.12, 0.25)))
+    if cls == "32PSK":     return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.07, 0.18)))
+    if cls in PSK_CONSTS:  return _digital(PSK_CONSTS[cls], n, rng, sps, ro)  # fallback
+    # Per-order rolloff gives the model a spectral BW cue between QAM grades.
+    # Ranges are grounded in real deployments (DOCSIS, DVB-C, cable modem):
+    #   QAM16  — looser rolloff, wider channels (legacy cable / basic DOCSIS)
+    #   QAM64  — moderate (DOCSIS 3.0 common)
+    #   QAM256 — tight rolloff, spectrally efficient (DOCSIS 3.0/3.1 high tier)
+    if cls == "QAM16":  return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.30, 0.50)))
+    if cls == "QAM32":  return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.20, 0.40)))
+    if cls == "QAM64":  return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.13, 0.28)))
+    if cls == "QAM256": return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.08, 0.18)))
+    if cls in QAM_CONSTS: return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), ro)  # fallback
     if cls == "FM_WB":     return _fm_wb(n, rng)
     if cls == "FM_NB":     return _fm_nb(n, rng)
     if cls == "AM_DSB":    return _am_dsb(n, rng)
@@ -674,24 +741,13 @@ def _gen_one(cls: str, n: int, rng: np.random.Generator) -> np.ndarray:
     if cls == "MDC_1200":  return _mdc1200(n, rng)
     if cls == "DTMF":      return _dtmf(n, rng)
     if cls == "EAS_SAME":  return _eas_same(n, rng)
-    if cls == "RTTY":      return _rtty(n, rng)
+    if cls == "RTTY":      return _rtty(n, rng, sps)
     if cls == "P25_PHASE2":return _p25_phase2(n, rng)
     if cls == "ADS_B":     return _adsb(n, rng)
     if cls == "DSC":       return _dsc(n, rng)
     if cls == "NAVTEX":    return _navtex(n, rng)
     if cls == "VDL2":      return _vdl2(n, rng)
-    if cls == "PSK31":     return _psk31(n, rng)
-    if cls == "FLEX":      return _flex(n, rng)
-    if cls == "MDC_1200":  return _mdc1200(n, rng)
-    if cls == "DTMF":      return _dtmf(n, rng)
-    if cls == "EAS_SAME":  return _eas_same(n, rng)
-    if cls == "RTTY":      return _rtty(n, rng)
-    if cls == "P25_PHASE2":return _p25_phase2(n, rng)
-    if cls == "ADS_B":     return _adsb(n, rng)
-    if cls == "DSC":       return _dsc(n, rng)
-    if cls == "NAVTEX":    return _navtex(n, rng)
-    if cls == "VDL2":      return _vdl2(n, rng)
-    if cls == "PSK31":     return _psk31(n, rng)
+    if cls == "PSK31":     return _psk31(n, rng, sps)
 
     raise ValueError(f"Unknown class: {cls}")
 
