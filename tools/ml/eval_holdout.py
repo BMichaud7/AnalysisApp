@@ -42,19 +42,93 @@ def load_session(model_path: str) -> ort.InferenceSession:
     )
 
 
-def run_inference(sess: ort.InferenceSession, X: np.ndarray) -> np.ndarray:
+def _softmax(x: np.ndarray) -> np.ndarray:
+    e = np.exp(x - x.max(axis=-1, keepdims=True))
+    return e / e.sum(axis=-1, keepdims=True)
+
+
+def run_inference(sess: ort.InferenceSession, X: np.ndarray,
+                  tta: int = 1) -> np.ndarray:
+    """Run inference with optional test-time augmentation.
+
+    tta > 1: average softmax over `tta` passes, each with a random per-sample
+    phase rotation (safe for all modulation classes — phase is arbitrary at
+    the receiver). Typically tta=8 gives ~1-2pp gain with no training changes.
+    """
     input_name = sess.get_inputs()[0].name
-    preds = []
+    if tta <= 1:
+        preds = []
+        for i in range(0, len(X), BATCH):
+            batch = X[i : i + BATCH]
+            logits = sess.run(None, {input_name: batch})[0]
+            preds.append(np.argmax(logits, axis=1))
+        return np.concatenate(preds)
+
+    # TTA: accumulate averaged softmax probabilities across passes
+    avg_probs = np.zeros((len(X), sess.get_outputs()[0].shape[1] or 1),
+                         dtype=np.float32)
+    rng = np.random.default_rng(0)
+    for _ in range(tta):
+        # Random phase rotation: multiply complex IQ by exp(j*theta)
+        theta = rng.uniform(0, 2 * np.pi, size=(len(X), 1)).astype(np.float32)
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        X_rot = X.copy()
+        X_rot[:, 0, :] = X[:, 0, :] * cos_t - X[:, 1, :] * sin_t
+        X_rot[:, 1, :] = X[:, 0, :] * sin_t + X[:, 1, :] * cos_t
+        for i in range(0, len(X_rot), BATCH):
+            batch = X_rot[i : i + BATCH]
+            logits = sess.run(None, {input_name: batch})[0]
+            if avg_probs.shape[1] == 1:
+                avg_probs = np.zeros((len(X), logits.shape[1]), dtype=np.float32)
+            avg_probs[i : i + BATCH] += _softmax(logits)
+    return np.argmax(avg_probs, axis=1)
+
+
+def _hierarchical_preds(sess: ort.InferenceSession,
+                        X: np.ndarray,
+                        model_classes: list[str]) -> np.ndarray:
+    """Family-gated argmax: pick best class only within the predicted family.
+
+    For each sample, softmax over all classes → sum within each family to get
+    family probabilities → pick winning family → argmax within that family.
+    This reduces the 47-class search space to ~5 per family, cutting inter-
+    family confusion (e.g. FM_WB mistaken for GFSK instead of FM_NB).
+    """
+    from family_map import CLASS_FAMILY, FAMILY_INDEX, NUM_FAMILIES
+    input_name = sess.get_inputs()[0].name
+
+    # Precompute: class_idx → family_idx
+    class_family = np.array(
+        [FAMILY_INDEX.get(CLASS_FAMILY.get(c, ""), -1) for c in model_classes],
+        dtype=np.int32)
+    # family_mask[f, c] = 1 if class c belongs to family f
+    family_mask = np.zeros((NUM_FAMILIES, len(model_classes)), dtype=np.float32)
+    for ci, fi in enumerate(class_family):
+        if fi >= 0:
+            family_mask[fi, ci] = 1.0
+
+    all_preds = []
     for i in range(0, len(X), BATCH):
         batch = X[i : i + BATCH]
         logits = sess.run(None, {input_name: batch})[0]
-        preds.append(np.argmax(logits, axis=1))
-    return np.concatenate(preds)
+        probs = np.exp(logits - logits.max(axis=1, keepdims=True))
+        probs /= probs.sum(axis=1, keepdims=True)          # (B, C)
+        fam_probs = probs @ family_mask.T                   # (B, F)
+        best_fam  = fam_probs.argmax(axis=1)               # (B,)
+        preds = np.zeros(len(batch), dtype=np.int64)
+        for j, fi in enumerate(best_fam):
+            mask_j = family_mask[fi]                        # (C,) 0/1
+            masked  = probs[j] * mask_j
+            preds[j] = masked.argmax()
+        all_preds.append(preds)
+    return np.concatenate(all_preds)
 
 
 def evaluate(sess: ort.InferenceSession,
              model_classes: list[str],
-             npz_path: str) -> dict:
+             npz_path: str,
+             tta: int = 1,
+             hierarchical: bool = False) -> dict:
     d = np.load(npz_path, allow_pickle=True)
     holdout_classes = [str(c) for c in d["classes"]]
     X, y_raw, snrs = d["X"], d["y"], d["snrs"]
@@ -73,7 +147,10 @@ def evaluate(sess: ort.InferenceSession,
 
     skipped = int((~mask).sum())
 
-    preds = run_inference(sess, X_f)
+    if hierarchical:
+        preds = _hierarchical_preds(sess, X_f, model_classes)
+    else:
+        preds = run_inference(sess, X_f, tta=tta)
     correct = (preds == y_m)
 
     # ── Overall ──────────────────────────────────────────────────────────────
@@ -129,6 +206,12 @@ def main() -> None:
                     default=["data/v3_holdout.npz", "data/v3_holdout_impaired.npz"])
     ap.add_argument("--out", default=None, metavar="JSON",
                     help="Save JSON report to this path")
+    ap.add_argument("--tta", type=int, default=1, metavar="N",
+                    help="Test-time augmentation passes (default 1 = off, 8 recommended)")
+    ap.add_argument("--hierarchical", action="store_true",
+                    help="Family-gated argmax: pick best class within predicted "
+                         "modulation family (QAM/PSK/FSK/AM/FM/etc) rather than "
+                         "flat 47-class argmax. Reduces inter-family confusion.")
     args = ap.parse_args()
 
     model_classes = json.load(open(args.classes))
@@ -141,7 +224,8 @@ def main() -> None:
         if not Path(npz).exists():
             print(f"WARNING: {npz} not found, skipping", file=sys.stderr)
             continue
-        r = evaluate(sess, model_classes, npz)
+        r = evaluate(sess, model_classes, npz, tta=args.tta,
+                     hierarchical=args.hierarchical)
         print_report(r)
         results.append(r)
 

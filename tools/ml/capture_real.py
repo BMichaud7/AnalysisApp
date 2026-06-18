@@ -41,7 +41,7 @@ import uuid
 import numpy as np
 from scipy import signal as sig
 
-sys.path.insert(0, "/tmp/proton_pkg")
+pass  # proton now installed in venv directly
 import proton
 import proton.handlers
 import proton.reactor
@@ -150,6 +150,118 @@ TARGETS: list[tuple] = [
     ("GFSK", 2420.0e6, 40e6, 40e6, 20, 4000),
     ("GFSK", 2441.0e6, 40e6, 40e6, 20, 4000),
     ("GFSK", 2462.0e6, 40e6, 40e6, 20, 3000),
+
+    # ── ADS-B — 1090 MHz Mode-S transponder (every aircraft, ~1 msg/sec) ────────
+    # Highest-reliability real-data source: always-on, enormous volume, high SNR.
+    # PPM at 1 Mbit/s, 1 MHz occupied BW. Capture wide enough to avoid IQ edge
+    # roll-off but not so wide noise drowns weaker aircraft.
+    ("ADS_B", 1090.0e6, 4e6,  4e6,  60, 8000),
+
+    # ── ACARS — aviation VHF data link (AM-MSK, ~2 kbps) ────────────────────
+    # Active near any commercial airport. 129.125 and 136.900 MHz are highest
+    # activity in the US; 130.025 is secondary. Good SNR from overflying aircraft.
+    ("ACARS", 129.125e6, 0.5e6, 0.5e6, 60, 4000),
+    ("ACARS", 130.025e6, 0.5e6, 0.5e6, 60, 3000),
+    ("ACARS", 136.900e6, 0.5e6, 0.5e6, 60, 4000),
+
+    # ── VDL2 — VHF Digital Link Mode 2 (D8PSK, 31.5 kbps) ───────────────────
+    # Aviation data link, same band as ACARS, replacing it on newer aircraft.
+    # 136.900 MHz is also used by VDL2 — share the dwell, label separately.
+    ("VDL2", 136.725e6, 0.5e6, 0.5e6, 60, 3000),
+    ("VDL2", 136.775e6, 0.5e6, 0.5e6, 60, 3000),
+    ("VDL2", 136.875e6, 0.5e6, 0.5e6, 60, 2000),
+
+    # ── AIS — maritime VHF (GMSK, 9.6 kbps, 25 kHz channels) ───────────────
+    # Always-on near any body of water with ship/boat traffic. Channels 87B/88B.
+    # Shares GMSK modulation but distinct protocol frame structure.
+    ("AIS", 161.975e6, 0.25e6, 0.25e6, 30, 3000),
+    ("AIS", 162.025e6, 0.25e6, 0.25e6, 30, 3000),
+
+    # ── DSC — Maritime VHF Channel 70 (FSK, 1200 baud) ──────────────────────
+    # Digital Selective Calling, mandatory on all GMDSS vessels. Near-continuous
+    # poll traffic on ch70 plus routine position reports.
+    ("DSC", 156.525e6, 0.25e6, 0.25e6, 30, 2000),
+
+    # ── P25 Phase 1 C4FM — public safety VHF/UHF (4-level FSK) ─────────────
+    # Most common digital voice protocol for US police/fire/EMS.
+    # Frequencies are area-specific — these are widely-used US defaults.
+    # Adjust to your local public safety trunked system if signal is absent.
+    ("P25_C4FM", 155.340e6, 0.025e6, 0.025e6, 120, 5000),  # common fire dispatch
+    ("P25_C4FM", 155.370e6, 0.025e6, 0.025e6, 120, 5000),
+    ("P25_C4FM", 154.920e6, 0.025e6, 0.025e6, 120, 4000),
+    ("P25_C4FM", 460.050e6, 0.025e6, 0.025e6, 120, 5000),  # common UHF public safety
+    ("P25_C4FM", 460.125e6, 0.025e6, 0.025e6, 120, 5000),
+    ("P25_C4FM", 460.225e6, 0.025e6, 0.025e6, 120, 4000),
+    ("P25_C4FM", 460.500e6, 0.025e6, 0.025e6, 120, 4000),
+    ("P25_C4FM", 851.025e6, 0.025e6, 0.025e6, 120, 4000),  # 800 MHz trunked
+    ("P25_C4FM", 851.525e6, 0.025e6, 0.025e6, 120, 4000),
+    ("P25_C4FM", 852.025e6, 0.025e6, 0.025e6, 120, 3000),
+
+    # ── DMR — commercial/public safety VHF/UHF (4FSK, TDMA) ─────────────────
+    # Same 12.5 kHz channels as P25, growing rapidly in both commercial and
+    # public safety. Check radioreference.com for local DMR talkgroups.
+    ("DMR", 462.550e6, 0.025e6, 0.025e6, 120, 4000),  # GMRS/FRS overlap, many DMR
+    ("DMR", 462.575e6, 0.025e6, 0.025e6, 120, 4000),
+    ("DMR", 462.600e6, 0.025e6, 0.025e6, 120, 3000),
+    ("DMR", 463.000e6, 0.025e6, 0.025e6, 120, 4000),
+    ("DMR", 464.550e6, 0.025e6, 0.025e6, 120, 3000),
+    ("DMR", 851.000e6, 0.025e6, 0.025e6, 120, 3000),  # 800 MHz trunked DMR
+
+    # ── POCSAG — numeric/text paging VHF (OOK/FSK, 512/1200/2400 bps) ───────
+    # Still active for hospital staff, fire alerts, industrial systems.
+    # 152–158 MHz in North America. Continuous broadcast on active channels.
+    ("POCSAG", 152.240e6, 0.025e6, 0.025e6, 60, 3000),
+    ("POCSAG", 152.480e6, 0.025e6, 0.025e6, 60, 3000),
+    ("POCSAG", 153.350e6, 0.025e6, 0.025e6, 60, 3000),
+    ("POCSAG", 157.450e6, 0.025e6, 0.025e6, 60, 2000),
+    ("POCSAG", 158.100e6, 0.025e6, 0.025e6, 60, 2000),
+    ("POCSAG", 931.9375e6, 0.025e6, 0.025e6, 60, 3000),  # US national paging
+
+    # ── FLEX — Motorola paging protocol VHF/UHF (4-level FSK, 1.6–6.4 kbps) ─
+    # Still widely used for hospital paging (more reliable than POCSAG in
+    # high-interference environments). Same 152–158 MHz band.
+    ("FLEX", 152.840e6, 0.025e6, 0.025e6, 60, 2000),
+    ("FLEX", 154.040e6, 0.025e6, 0.025e6, 60, 2000),
+
+    # ── CSS / LoRa — ISM 915 MHz chirp spread spectrum ───────────────────────
+    # LoRaWAN gateways are ubiquitous in urban/suburban US. Always active on
+    # 902–928 MHz. 8 uplink channels + 1 downlink. Long dwell to catch sparse
+    # uplink traffic from battery-powered IoT sensors.
+    ("CSS", 902.300e6, 0.5e6, 0.5e6, 120, 4000),
+    ("CSS", 902.500e6, 0.5e6, 0.5e6, 120, 4000),
+    ("CSS", 903.900e6, 0.5e6, 0.5e6, 120, 3000),
+    ("CSS", 905.300e6, 0.5e6, 0.5e6, 120, 3000),
+    ("CSS", 433.175e6, 0.5e6, 0.5e6, 120, 2000),  # EU/Asia LoRa, also common in US
+
+    # ── NXDN — Kenwood/Icom narrowband digital (4FSK or FDMA) ───────────────
+    # Business radio protocol, 6.25 kHz or 12.5 kHz channels, VHF/UHF.
+    # Less common than DMR/P25 but present in industrial and utility systems.
+    ("NXDN", 451.000e6, 0.015e6, 0.015e6, 60, 2000),
+    ("NXDN", 451.100e6, 0.015e6, 0.015e6, 60, 2000),
+    ("NXDN", 456.050e6, 0.015e6, 0.015e6, 60, 2000),
+
+    # ── TETRA — public safety digital trunked (π/4-DQPSK, 25 kHz) ───────────
+    # Dominant public safety digital voice in Europe/APAC; limited US presence.
+    # US trunked TETRA is rare — add if known local system exists.
+    # European frequencies shown; replace with local if applicable.
+    # ("TETRA", 380.000e6, 0.025e6, 0.025e6, 120, 2000),  # EU Airwave/BOS
+    # ("TETRA", 390.000e6, 0.025e6, 0.025e6, 120, 2000),
+
+    # ── D-STAR — Icom amateur digital voice (GMSK, 4.8 kbps) ────────────────
+    # Ham radio digital voice — active on 2m/70cm repeaters.
+    ("DSTAR", 144.1125e6, 0.025e6, 0.025e6, 60, 2000),  # 2m simplex
+    ("DSTAR", 145.375e6,  0.025e6, 0.025e6, 60, 2000),  # common 2m repeater output
+    ("DSTAR", 441.000e6,  0.025e6, 0.025e6, 60, 2000),  # 70cm repeater output
+    ("DSTAR", 443.000e6,  0.025e6, 0.025e6, 60, 2000),
+
+    # ── EAS_SAME — NOAA Weather Radio emergency tones (FSK, 520.83 bps) ─────
+    # EAS tones broadcast before every weather alert/test on NOAA WX channels
+    # (already captured above as FM_NB). Here we capture longer dwells on the
+    # most active NOAA channels specifically to catch weekly required tests
+    # (Wednesdays 11am ET) and real alerts. Long dwell, low max_windows since
+    # actual EAS tone bursts are infrequent.
+    ("EAS_SAME", 162.400e6, 0.5e6, 0.5e6, 300, 500),
+    ("EAS_SAME", 162.550e6, 0.5e6, 0.5e6, 300, 500),
 
     # ── Noise-only capture for PlutoSDR impairment measurement ───────────────
     ("_NOISE", 500.0e6,  2e6,  2e6,  10, 0),
@@ -370,6 +482,8 @@ def main() -> None:
     ap.add_argument("--gain",    type=float, default=50.0)
     ap.add_argument("--snr-min", type=float, default=3.0)
     ap.add_argument("--max-per-class", type=int, default=8000)
+    ap.add_argument("--filter-classes", nargs="+", metavar="CLS",
+                    help="Only capture these classes (subset of TARGETS)")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -392,10 +506,14 @@ def main() -> None:
     class_counts: dict[str, int] = {}
     impairments: dict = {}
 
+    filter_cls = set(args.filter_classes) if args.filter_classes else None
+
     for (label, freq_hz, bw_hz, sr_sps, dwell_s, max_wins) in TARGETS:
+        if filter_cls and label not in filter_cls and label != "_NOISE":
+            continue
         cap_max = min(max_wins, args.max_per_class) if label != "_NOISE" else 0
         print(f"[{label}]  {freq_hz/1e6:.3f} MHz  "
-              f"BW={bw_hz/1e6:.1f} MHz  {dwell_s}s  max={cap_max}", flush=True)
+              f"BW={bw_hz/1e3:.0f} kHz  {dwell_s}s  max={cap_max}", flush=True)
 
         iq = request_capture(sess, freq_hz, bw_hz, sr_sps,
                              args.gain, dwell_s, verbose=args.verbose)

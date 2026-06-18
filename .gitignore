@@ -14,3 +14,6 @@ tools/ml/signals.db
 # Generated docs
 docs/html/
 docs/master/
+
+# CTest artifacts
+Testing/

@@ -286,6 +286,21 @@ class IqAugment(nn.Module):
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
+class DomainDataset(torch.utils.data.Dataset):
+    """Wraps a Subset/Dataset and appends a domain label (0=synthetic, 1=real)."""
+    def __init__(self, subset, domain_tensor: torch.Tensor):
+        self.subset = subset
+        self.domain = domain_tensor
+
+    def __len__(self) -> int:
+        return len(self.subset)
+
+    def __getitem__(self, idx):
+        batch = self.subset[idx]
+        global_idx = self.subset.indices[idx]
+        return batch[0], batch[1], self.domain[global_idx]
+
+
 def train(model:          nn.Module,
           loader:         DataLoader,
           val_loader:     DataLoader,
@@ -299,7 +314,11 @@ def train(model:          nn.Module,
           focal_gamma:    float | None = None,
           label_smoothing: float = 0.05,
           sgdr_t0:        int   = 0,
-          augment:        IqAugment | None = None) -> nn.Module:
+          augment:        IqAugment | None = None,
+          family_aux_weight: float = 0.0,
+          family_proj:    torch.Tensor | None = None,
+          dann_weight:    float = 0.0,
+          dann_alpha_max: float = 1.0) -> nn.Module:
     """
     Train model with:
       - AdamW optimiser, gradient clipping
@@ -331,6 +350,15 @@ def train(model:          nn.Module,
     else:
         crit = nn.CrossEntropyLoss(weight=w, label_smoothing=label_smoothing)
         print(f"  Loss: CrossEntropy(label_smoothing={label_smoothing})")
+
+    # Auxiliary family head: fixed projection (no learned params), just
+    # sum logits within each family. Acts as a regularisation signal that
+    # pushes the model to separate modulation families before fine classes.
+    fam_proj = None
+    if family_aux_weight > 0.0 and family_proj is not None:
+        fam_proj = family_proj.to(device)
+        print(f"  Family aux loss weight: {family_aux_weight} "
+              f"({fam_proj.shape[1]} families)")
     best_score  = 0.0   # composite: 0.7*val_acc + 0.3*min_class
     best_state  = None
     # Use the model's actual output dimension, not the first-batch max label.
@@ -342,13 +370,20 @@ def train(model:          nn.Module,
     if augment is not None:
         augment = augment.to(device).train()
 
+    use_dann = dann_weight > 0.0 and hasattr(model, "forward_dann")
+
     for epoch in range(1, epochs + 1):
         model.train()
         if augment is not None:
             augment.train()
         train_loss = 0.0
-        for X_b, y_b in tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=False):
-            X_b, y_b = X_b.to(device), y_b.to(device)
+        # DANN reversal strength: 0 → dann_alpha_max following Ganin et al. schedule
+        p = (epoch - 1) / max(1, epochs - 1)
+        dann_alpha = dann_alpha_max * (2.0 / (1.0 + math.exp(-10.0 * p)) - 1.0)
+
+        for batch in tqdm(loader, desc=f"Epoch {epoch}/{epochs}", leave=False):
+            X_b, y_b = batch[0].to(device), batch[1].to(device)
+            d_b = batch[2].to(device) if len(batch) > 2 else None
             if augment is not None:
                 X_b = augment(X_b)
             opt.zero_grad()
@@ -356,9 +391,22 @@ def train(model:          nn.Module,
                 X_b, y_a, y_b2, lam = mixup_batch(X_b, y_b)
                 logits = model(X_b)
                 loss   = mixup_loss(crit, logits, y_a, y_b2, lam)
+            elif use_dann and d_b is not None:
+                logits, dom_logits = model.forward_dann(X_b, alpha=dann_alpha)
+                loss = crit(logits, y_b)
+                loss = loss + dann_weight * F.cross_entropy(dom_logits, d_b)
             else:
                 logits = model(X_b)
                 loss   = crit(logits, y_b)
+            if fam_proj is not None:
+                # family logits = sum of class logits within each family
+                fam_logits = logits @ fam_proj          # (B, F)
+                fam_labels = (y_b.unsqueeze(1) == torch.arange(
+                    logits.shape[1], device=device).unsqueeze(0)
+                ).float() @ fam_proj                    # (B, F) one-hot family
+                fam_labels = fam_labels.argmax(dim=1)   # (B,) family index
+                loss = loss + family_aux_weight * nn.functional.cross_entropy(
+                    fam_logits, fam_labels)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
@@ -415,7 +463,8 @@ def confusion_report(model:       nn.Module,
     model.eval()
     all_preds, all_labels = [], []
     with torch.no_grad():
-        for X_b, y_b in loader:
+        for batch in loader:
+            X_b, y_b = batch[0], batch[1]
             preds = model(X_b.to(device)).argmax(dim=1).cpu().numpy()
             all_preds.extend(preds)
             all_labels.extend(y_b.numpy())
@@ -460,6 +509,24 @@ def main() -> None:
                     help="ResNet channel width (default 128)")
     ap.add_argument("--n-blocks",  type=int,   default=12,
                     help="Number of residual blocks (default 12)")
+    ap.add_argument("--n-fft",     type=int,   default=512,
+                    help="STFT n_fft for RadioFusion spectrogram path (default 512 → 390 Hz/bin at 200 kHz)")
+    ap.add_argument("--family-aux", type=float, default=0.0, metavar="WEIGHT",
+                    help="Auxiliary family-classification loss weight (e.g. 0.2). "
+                         "Adds a linear family head on pooled features; encourages "
+                         "the model to organise representations by modulation family "
+                         "before fine-grained class discrimination.")
+    ap.add_argument("--dann",      type=float, default=0.0, metavar="WEIGHT",
+                    help="DANN domain adversarial loss weight (0=disabled). "
+                         "Drives the shared representation to be domain-invariant "
+                         "between synthetic and real data via gradient reversal.")
+    ap.add_argument("--dann-alpha", type=float, default=1.0, metavar="ALPHA",
+                    help="Max gradient-reversal strength for DANN (default 1.0). "
+                         "Linearly scheduled from 0→ALPHA over training epochs.")
+    ap.add_argument("--dann-real", nargs="+", default=[], metavar="FILE",
+                    help="NPZ files (subset of --npz) that are real captures "
+                         "(domain=1). All other --npz files are synthetic (domain=0). "
+                         "Required when --dann > 0.")
     ap.add_argument("--epochs",  type=int,   default=50)
     ap.add_argument("--batch",   type=int,   default=256)
     ap.add_argument("--lr",      type=float, default=1e-3)
@@ -506,6 +573,26 @@ def main() -> None:
     input_len   = X.shape[-1]
     num_classes = len(class_names)
     print(f"  Samples: {len(X)}  Input length: {input_len}  Classes: {num_classes}")
+
+    # ── DANN domain labels (0=synthetic, 1=real) ─────────────────────────────
+    domain_tensor: torch.Tensor | None = None
+    if args.dann > 0.0 and args.dann_real and args.npz:
+        dann_real_set = set(args.dann_real)
+        print(f"  DANN: real files = {args.dann_real}")
+        domain_parts = []
+        for npz_path in args.npz:
+            s = load_numpy_npz(npz_path, snr_min_db=args.snr_min,
+                               max_per_class=args.max_per_class)
+            dom = 1 if npz_path in dann_real_set else 0
+            domain_parts.extend([dom] * len(s))
+        domain_tensor = torch.tensor(domain_parts, dtype=torch.long)
+        if len(domain_tensor) != len(X):
+            print(f"  [warn] domain label count {len(domain_tensor)} ≠ sample count "
+                  f"{len(X)} — DANN disabled")
+            domain_tensor = None
+        else:
+            n_real = int((domain_tensor == 1).sum())
+            print(f"  Domain labels: {len(X) - n_real:,} synthetic, {n_real:,} real")
 
     # ── Split ─────────────────────────────────────────────────────────────────
     dataset = TensorDataset(X, y)
@@ -556,6 +643,10 @@ def main() -> None:
         'P25_C4FM', 'NXDN', 'DTMF', 'GFSK', 'FSK', 'TONE', '4FSK', '8FSK',
     }
     boost_factor = args.boost_hard or args.boost_qam  # accept either flag
+    # Optionally wrap train_ds with domain labels for DANN
+    dann_train_ds = (DomainDataset(train_ds, domain_tensor)
+                     if domain_tensor is not None else train_ds)
+
     if boost_factor and boost_factor > 1.0:
         hard_idx     = {i for i, n in enumerate(class_names) if n in HARD_CLASSES
                         or "QAM" in n or "PSK" in n}
@@ -566,11 +657,11 @@ def main() -> None:
             torch.ones(len(train_ds)),
         )
         sampler = WeightedRandomSampler(sample_w, len(train_ds), replacement=True)
-        train_loader = DataLoader(train_ds, sampler=sampler, **kw)
+        train_loader = DataLoader(dann_train_ds, sampler=sampler, **kw)
         boosted = sorted(class_names[i] for i in hard_idx)
         print(f"  Hard-class boost ×{boost_factor:.1f}: {boosted}")
     else:
-        train_loader = DataLoader(train_ds, shuffle=True, **kw)
+        train_loader = DataLoader(dann_train_ds, shuffle=True, **kw)
 
     val_loader   = DataLoader(val_ds,   shuffle=False, **kw)
     test_loader  = DataLoader(test_ds,  shuffle=False, **kw)
@@ -583,7 +674,9 @@ def main() -> None:
                             channels=args.channels, n_blocks=args.n_blocks)
         print(f"  RadioResNet: channels={args.channels}, n_blocks={args.n_blocks}")
     else:
-        model = RadioFusion(num_classes=num_classes, input_len=input_len)
+        model = RadioFusion(num_classes=num_classes, input_len=input_len,
+                            n_fft=args.n_fft)
+        print(f"  RadioFusion: IQ(channels=128,n_blocks=8) + STFT(n_fft={args.n_fft})")
 
     model = model.to(device)
     n_params = sum(p.numel() for p in model.parameters())
@@ -621,6 +714,15 @@ def main() -> None:
         print(f"  Real noise bank: {len(noise_bank):,} segments from {args.noise_npz}")
     augment = IqAugment(noise_bank=noise_bank) if args.augment else None
     ckpt_path = args.out.replace(".onnx", ".best.pt")
+
+    family_proj = None
+    if args.family_aux > 0.0:
+        from family_map import family_projection_matrix
+        family_proj = family_projection_matrix(class_names)
+        print(f"  Family aux loss enabled (weight={args.family_aux})")
+
+    if args.dann > 0.0:
+        print(f"  DANN: weight={args.dann}, alpha_max={args.dann_alpha}")
     model = train(model, train_loader, val_loader, device,
                   epochs=args.epochs, lr=args.lr,
                   use_mixup=not args.no_mixup, warmup_epochs=min(8, args.epochs // 10),
@@ -628,7 +730,11 @@ def main() -> None:
                   focal_gamma=args.focal,
                   label_smoothing=args.label_smoothing,
                   sgdr_t0=args.sgdr_t0,
-                  augment=augment)
+                  augment=augment,
+                  family_aux_weight=args.family_aux,
+                  family_proj=family_proj,
+                  dann_weight=args.dann,
+                  dann_alpha_max=args.dann_alpha)
 
     # ── Test + report ─────────────────────────────────────────────────────────
     print("\n── Test Set Evaluation ──")

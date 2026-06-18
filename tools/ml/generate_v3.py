@@ -97,16 +97,73 @@ def _impair(iq: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     # IQ phase skew (±3°)
     phi = rng.uniform(-0.05, 0.05)
     iq = iq.real * (1 + 0j) + iq.imag * (math.sin(phi) + 1j * math.cos(phi))
-    # Frequency offset (±0.3% of SR — post-AFC residual).
+    # Frequency offset (±0.1% of SR — post-AFC residual).
     # ±2% SR caused 10+ full carrier rotations over 512 samples, destroying
     # all constellation structure and making all modulations look identical.
-    # ±0.3% SR ≈ ±1.5 rotations — preserves constellation while staying robust.
-    fo = rng.uniform(-0.003, 0.003) * SR
+    # ±0.3% SR (600Hz @ 200kHz) coincided with P25_C4FM/DMR's smallest FSK
+    # deviation step (600/648Hz), so at high SNR — where this fixed offset
+    # dominates over the now-tiny AWGN — it shifted the deviation pattern by
+    # a full symbol level, collapsing P25_C4FM/4FSK/AM_DSB/MDC_1200/etc. into
+    # lookalike classes (FM_NB, 8FSK, TONE). ±0.1% SR (200Hz) stays below
+    # every FSK family's smallest deviation while still ≈±0.5 rotations.
+    fo = rng.uniform(-0.001, 0.001) * SR
     t  = np.arange(len(iq)) / SR
     iq = iq * np.exp(1j * 2 * math.pi * fo * t).astype(np.complex64)
     # Phase noise
     pn = np.cumsum(rng.standard_normal(len(iq)) * 0.005).astype(np.float32)
     iq = iq * np.exp(1j * pn)
+    return iq.astype(np.complex64)
+
+
+# Per-device impairment ranges, used by _impair_multi_sdr below.
+# (dc, amp_imbalance_db, phase_skew, freq_offset_frac_sr, phase_noise_std)
+_SDR_PROFILES = {
+    "pluto":   dict(dc=0.02,  amp_db=0.05, phi=0.05,  fo_frac=0.003, pn_std=0.005, multipath=0.0),
+    "hackrf":  dict(dc=0.04,  amp_db=0.15, phi=0.10,  fo_frac=0.006, pn_std=0.010, multipath=0.0),
+    "rtlsdr":  dict(dc=0.06,  amp_db=0.30, phi=0.15,  fo_frac=0.004, pn_std=0.003, multipath=0.0),
+    "clean":   dict(dc=0.002, amp_db=0.01, phi=0.01,  fo_frac=0.0005, pn_std=0.001, multipath=0.0),
+    "ota":     dict(dc=0.02,  amp_db=0.05, phi=0.05,  fo_frac=0.003, pn_std=0.005, multipath=0.3),
+}
+_SDR_PROFILE_NAMES = list(_SDR_PROFILES.keys())
+_SDR_PROFILE_WEIGHTS = np.array([0.30, 0.20, 0.25, 0.10, 0.15])
+_SDR_PROFILE_WEIGHTS = _SDR_PROFILE_WEIGHTS / _SDR_PROFILE_WEIGHTS.sum()
+
+
+def _impair_multi_sdr(iq: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Apply impairments drawn from a randomly-selected SDR device profile.
+
+    Generalizes _impair() (PlutoSDR-only) by randomizing the impairment
+    magnitudes per-sample across Pluto/HackRF/RTL-SDR/clean/over-the-air
+    profiles, so the model sees cross-device variation instead of a single
+    fixed hardware fingerprint.
+    """
+    name = _SDR_PROFILE_NAMES[rng.choice(len(_SDR_PROFILE_NAMES), p=_SDR_PROFILE_WEIGHTS)]
+    p = _SDR_PROFILES[name]
+
+    # DC offset
+    dc = rng.uniform(-p["dc"], p["dc"]) + 1j * rng.uniform(-p["dc"], p["dc"])
+    iq = iq + dc
+    # IQ amplitude imbalance
+    amp = 10 ** (rng.uniform(-p["amp_db"], p["amp_db"]) / 20)
+    iq = iq.real * amp + 1j * iq.imag / amp
+    # IQ phase skew
+    phi = rng.uniform(-p["phi"], p["phi"])
+    iq = iq.real * (1 + 0j) + iq.imag * (math.sin(phi) + 1j * math.cos(phi))
+    # Frequency offset (post-AFC residual)
+    fo = rng.uniform(-p["fo_frac"], p["fo_frac"]) * SR
+    t  = np.arange(len(iq)) / SR
+    iq = iq * np.exp(1j * 2 * math.pi * fo * t).astype(np.complex64)
+    # Phase noise
+    pn = np.cumsum(rng.standard_normal(len(iq)) * p["pn_std"]).astype(np.float32)
+    iq = iq * np.exp(1j * pn)
+    # Multipath (over-the-air): single delayed/attenuated echo
+    if p["multipath"] > 0:
+        delay = int(rng.integers(1, max(2, len(iq) // 8)))
+        echo_amp = rng.uniform(0.05, p["multipath"])
+        echo = np.zeros_like(iq)
+        echo[delay:] = iq[:-delay] * echo_amp
+        iq = iq + echo
+
     return iq.astype(np.complex64)
 
 
@@ -218,7 +275,10 @@ def _fm_nb(n: int, rng: np.random.Generator) -> np.ndarray:
     """Narrowband FM: 5 kHz deviation, voice-like audio."""
     audio = rng.standard_normal(n).astype(np.float32)
     # Bandpass to 300-3400 Hz (voice)
-    b = np.sinc(2 * 3400 / SR * np.arange(-32, 33)) - np.sinc(2 * 300 / SR * np.arange(-32, 33))
+    # Hamming-windowed: a bare rectangular-windowed sinc-difference filter has
+    # ~-13dB sidelobes, leaking energy out to +-23kHz despite a 300-3400Hz
+    # passband -- the windowed version tightens -20dB occupied BW to ~+-7.5kHz.
+    b = (np.sinc(2 * 3400 / SR * np.arange(-32, 33)) - np.sinc(2 * 300 / SR * np.arange(-32, 33))) * np.hamming(65)
     b = b.astype(np.float32); b /= b.sum() if b.sum() > 0 else 1
     audio = lfilter(b, [1.0], audio).astype(np.float32)
     audio /= max(np.abs(audio).max(), 1e-9)
@@ -240,9 +300,25 @@ def _am_dsb(n: int, rng: np.random.Generator) -> np.ndarray:
     sidebands at fc ± audio_bw.  AM_DSB_SC is just m(t) (no carrier term),
     giving a distinctly different spectral and envelope shape.
     """
+    # Bandlimit to voice band (300-3400 Hz): unfiltered white-noise "audio"
+    # occupies the full ±100kHz Nyquist range, making AM_DSB's sidebands
+    # span the entire spectrum instead of the ~5-10kHz a real AM signal
+    # occupies (same fix as AM_SSB/FM_NB).
     audio = rng.standard_normal(n).astype(np.float32)
+    # Hamming-windowed: a bare rectangular-windowed sinc-difference filter has
+    # ~-13dB sidelobes, leaking energy out to +-23kHz despite a 300-3400Hz
+    # passband -- the windowed version tightens -20dB occupied BW to ~+-7.5kHz.
+    b = (np.sinc(2 * 3400 / SR * np.arange(-32, 33)) - np.sinc(2 * 300 / SR * np.arange(-32, 33))) * np.hamming(65)
+    b = b.astype(np.float32); b /= b.sum() if b.sum() > 0 else 1
+    audio = lfilter(b, [1.0], audio).astype(np.float32)
     depth = rng.uniform(0.5, 0.95)
-    env   = (1.0 + depth * audio / max(np.abs(audio).max(), 1e-9)).astype(np.float32)
+    # Normalise by std, not peak: peak-normalising a 1024-sample Gaussian
+    # divides by ~3.5-4 sigma, shrinking the effective modulation depth ~4x
+    # (e.g. depth=0.7 -> sideband std ~0.18). Sidebands then sit ~14dB below
+    # the carrier — below the -10dB occupied-BW threshold, so AM_DSB collapses
+    # to a pure-tone spectrum and gets confused with TONE. Std-normalising
+    # makes `depth` the actual sideband-to-carrier amplitude ratio.
+    env   = (1.0 + depth * audio / max(audio.std(), 1e-9)).astype(np.float32)
     env   = np.clip(env, 0.0, None)
     # Carrier at random offset — exposes the DSB symmetric sideband structure
     carrier_hz = rng.uniform(0.03, 0.35) * SR
@@ -252,13 +328,46 @@ def _am_dsb(n: int, rng: np.random.Generator) -> np.ndarray:
 
 
 def _am_dsb_sc(n: int, rng: np.random.Generator) -> np.ndarray:
+    """AM-DSB-SC: symmetric sidebands around a carrier, no carrier tone.
+
+    Previous bug: returned the real-valued bandlimited audio cast straight to
+    complex (Q == 0 everywhere) -- a Hermitian-symmetric spectrum centered at
+    DC, identical in character to 4ASK/16ASK/OOK's real-valued RRC-shaped
+    baseband symbols (also DC-centered, also Hermitian). The model could not
+    tell AM_DSB_SC apart from the ASK family (top confusion: AM_DSB_SC->4ASK).
+
+    Fix: mix the audio onto a complex carrier at a random frequency offset, as
+    in AM_DSB, but without the "+1" carrier term -- this gives symmetric
+    sidebands around fc with a null at fc (no carrier spike), the defining
+    DSB-SC characteristic, at a spectral location distinct from baseband ASK.
+    """
+    # Bandlimit to voice band (300-3400 Hz), same as AM_DSB/AM_SSB/FM_NB --
+    # unfiltered white-noise "audio" occupied the full ±100kHz Nyquist range.
     audio = rng.standard_normal(n).astype(np.float32)
+    # Hamming-windowed: a bare rectangular-windowed sinc-difference filter has
+    # ~-13dB sidelobes, leaking energy out to +-23kHz despite a 300-3400Hz
+    # passband -- the windowed version tightens -20dB occupied BW to ~+-7.5kHz.
+    b = (np.sinc(2 * 3400 / SR * np.arange(-32, 33)) - np.sinc(2 * 300 / SR * np.arange(-32, 33))) * np.hamming(65)
+    b = b.astype(np.float32); b /= b.sum() if b.sum() > 0 else 1
+    audio = lfilter(b, [1.0], audio).astype(np.float32)
     audio /= max(np.abs(audio).max(), 1e-9)
-    return _norm(audio.astype(np.complex64))
+    carrier_hz = rng.uniform(0.03, 0.35) * SR
+    t = np.arange(n) / SR
+    carrier = np.exp(1j * 2 * math.pi * carrier_hz * t).astype(np.complex64)
+    return _norm(audio.astype(np.complex64) * carrier)
 
 
 def _am_ssb(n: int, upper: bool, rng: np.random.Generator) -> np.ndarray:
-    audio  = rng.standard_normal(n).astype(np.float32)
+    # Bandlimit to voice band (300-3400 Hz) before single-sidebanding --
+    # unfiltered white-noise "audio" occupied the full one-sided Nyquist
+    # band (~100kHz) instead of the ~3kHz a real SSB voice signal occupies.
+    audio = rng.standard_normal(n).astype(np.float32)
+    # Hamming-windowed: a bare rectangular-windowed sinc-difference filter has
+    # ~-13dB sidelobes, leaking energy out to +-23kHz despite a 300-3400Hz
+    # passband -- the windowed version tightens -20dB occupied BW to ~+-7.5kHz.
+    b = (np.sinc(2 * 3400 / SR * np.arange(-32, 33)) - np.sinc(2 * 300 / SR * np.arange(-32, 33))) * np.hamming(65)
+    b = b.astype(np.float32); b /= b.sum() if b.sum() > 0 else 1
+    audio = lfilter(b, [1.0], audio).astype(np.float32)
     spec   = np.fft.fft(audio)
     freqs  = np.fft.fftfreq(n)
     spec[freqs <= 0 if upper else freqs >= 0] = 0
@@ -371,8 +480,13 @@ def _nxdn(n: int, rng: np.random.Generator) -> np.ndarray:
 
 
 def _dstar(n: int, rng: np.random.Generator) -> np.ndarray:
-    """D-STAR: GMSK, 4800 bps, BT=0.5. Amateur digital voice."""
-    return _gfsk(2, n, rng, sps=40, dev=SR * 0.024, bt=0.5)
+    """D-STAR: GMSK, 4800 bps, BT=0.5. Amateur digital voice.
+
+    Deviation ~1.5kHz (MI~0.625) per spec -- the previous dev=SR*0.024=4800Hz
+    (MI~1.92) gave occupied BW ~12-14kHz, more than double the real ~6.25kHz
+    D-STAR channel.
+    """
+    return _gfsk(2, n, rng, sps=40, dev=1600.0, bt=0.5)
 
 
 def _tetra(n: int, rng: np.random.Generator) -> np.ndarray:
@@ -434,13 +548,16 @@ def _acars(n: int, rng: np.random.Generator) -> np.ndarray:
     freq_seq = np.repeat([tones[s] for s in syms], sps)[:n]
     audio = np.sin(2 * math.pi * np.cumsum(freq_seq / SR)).astype(np.float32)
     audio /= max(np.abs(audio).max(), 1e-9)
-    # AM modulate: depth 0.85, carrier at ~20% of SR
+    # AM modulate: depth 0.85, carrier at ~20% of SR.
+    # Real carrier * real envelope, cast to complex (or rotated by a constant
+    # phase) leaves Q a scaled copy of I -> Hermitian-symmetric spectrum,
+    # mirrored around the carrier and roughly doubling occupied BW. Use a
+    # complex carrier so only the intended (carrier_freq) sideband appears.
     carrier_freq = rng.uniform(0.10, 0.20) * SR
-    carrier = np.sin(2 * math.pi * carrier_freq * t).astype(np.float32)
+    carrier = np.exp(1j * 2 * math.pi * carrier_freq * t).astype(np.complex64)
     depth = rng.uniform(0.7, 0.95)
-    am = ((1.0 + depth * audio) * carrier).astype(np.float32)
-    phase_angle = rng.uniform(0, 2 * math.pi)
-    iq = am * np.exp(1j * phase_angle).astype(np.complex64)
+    env = (1.0 + depth * audio).astype(np.float32)
+    iq = env.astype(np.complex64) * carrier
     return _norm(iq)
 
 
@@ -451,9 +568,15 @@ def _flex(n: int, rng: np.random.Generator) -> np.ndarray:
     dev = np.array([-1600, -600, 600, 1600], dtype=float) / SR
     n_syms = math.ceil(n / sps) + 5
     syms = rng.integers(0, 4, n_syms)
-    # Insert FLEX sync word 0xA8C9 as dibits
+    # Insert FLEX sync word 0xA8C9 as dibits. sps=125 means 8 sync symbols
+    # (the old length) = 1000/1024 samples -- almost the ENTIRE window was the
+    # fixed sync pattern with no random data, collapsing intra-class diversity
+    # (every sample showed the same constant bandwidth). Keep the sync short
+    # and only sometimes present so most windows show randomized data symbols.
     sync_dibits = [2,2,3,1,2,2,3,1]  # 0xA8C9 approximated as 4-level
-    syms[:min(8,n_syms)] = sync_dibits[:min(8,n_syms)]
+    pre_len = min(2, n_syms)
+    if rng.random() > 0.5:
+        syms[:pre_len] = sync_dibits[:pre_len]
     freq_seq = np.repeat([dev[s] for s in syms], sps)[:n]
     phase = np.cumsum(2 * math.pi * freq_seq)
     return _norm(np.exp(1j * phase).astype(np.complex64))
@@ -465,8 +588,12 @@ def _mdc1200(n: int, rng: np.random.Generator) -> np.ndarray:
     dev = 1200.0 / SR
     n_syms = math.ceil(n / sps) + 5
     syms = rng.integers(0, 2, n_syms)
-    # Preamble: pre-tone at 1200 Hz then data
-    pre_len = min(16, n_syms)
+    # Short idle-at-mark preamble before data. n_syms is only ~12 for a
+    # 1024-sample window at sps=166, so a 16-symbol preamble (the old
+    # pre_len=min(16,n_syms)) consumed ALL symbols -- the whole window was
+    # a constant +1200Hz tone with no FSK transitions, collapsing to TONE.
+    # Keep the preamble short so randomized data symbols remain visible.
+    pre_len = min(2, n_syms)
     syms[:pre_len] = 1  # idle at mark
     freq_seq = np.repeat([dev if s else -dev for s in syms], sps)[:n]
     phase = np.cumsum(2 * math.pi * freq_seq)
@@ -491,11 +618,15 @@ def _dtmf(n: int, rng: np.random.Generator) -> np.ndarray:
         t_seg = t[start:end]
         signal[start:end] = (np.sin(2*math.pi*rows[row]*t_seg) +
                               np.sin(2*math.pi*cols[col]*t_seg)).astype(np.float32)
-    # AM modulate onto a carrier
+    # AM modulate onto a carrier. A real carrier * real envelope cast to
+    # complex leaves Q == 0 everywhere (perfectly Hermitian-symmetric
+    # spectrum, mirrored around the carrier) -- use a complex carrier so
+    # the signal occupies only its intended sideband.
     carrier_hz = rng.uniform(0.05, 0.15) * SR
     signal /= max(np.abs(signal).max(), 1e-9)
-    carrier = np.sin(2*math.pi*carrier_hz*t).astype(np.float32)
-    return _norm(((1.0 + 0.85*signal)*carrier).astype(np.complex64))
+    carrier = np.exp(1j * 2 * math.pi * carrier_hz * t).astype(np.complex64)
+    env = (1.0 + 0.85 * signal).astype(np.float32)
+    return _norm(env.astype(np.complex64) * carrier)
 
 
 def _eas_same(n: int, rng: np.random.Generator) -> np.ndarray:
@@ -526,29 +657,37 @@ def _eas_same(n: int, rng: np.random.Generator) -> np.ndarray:
     audio = audio[off:off + n]
     t = np.arange(n) / SR
     carrier_hz = rng.uniform(0.05, 0.15) * SR   # narrower range, distinct from ACARS
-    carrier = np.sin(2 * math.pi * carrier_hz * t).astype(np.float32)
-    return _norm(((1.0 + 0.85 * audio) * carrier).astype(np.complex64))
+    # Complex carrier (see ACARS/DTMF): a real carrier * real envelope cast to
+    # complex is Hermitian-symmetric, mirroring the signal around the carrier
+    # and roughly doubling occupied BW.
+    carrier = np.exp(1j * 2 * math.pi * carrier_hz * t).astype(np.complex64)
+    env = (1.0 + 0.85 * audio).astype(np.float32)
+    return _norm(env.astype(np.complex64) * carrier)
 
 
 def _rtty(n: int, rng: np.random.Generator, sps: int = 8) -> np.ndarray:
     """RTTY: 2-FSK, ±85 Hz shift at 45.45 baud (Baudot ITA-2).
 
-    IMPORTANT: sps must be large enough for meaningful phase accumulation.
-    At SR=200kHz the real RTTY baud rate of 45.45 Bd → sps=4400.  At sps=4-12
-    from _gen_one, dev=85/SR=0.000425 gives only ~0.01-0.03 rad/symbol — the
-    signal is effectively DC and the model cannot learn the RTTY feature.
+    At SR=200kHz: sps=4400, so the 1024-sample window spans only ~0.23 symbols.
+    Without a transition visible in the window, RTTY looks like a single tone
+    indistinguishable from NAVTEX (also a slow narrow-deviation 2-FSK).
 
-    Fix: ignore the passed sps and always use the real baud rate.  This gives
-    ~1.87 phase cycles per symbol (clearly FSK).  Generate a long sequence and
-    take a random slice so transitions are sometimes visible in 1024-sample windows.
-    The model learns "slow narrow-deviation 2-FSK" as the RTTY cue.
+    Fix: center the window on a random symbol boundary so exactly one ±85 Hz
+    frequency step falls inside the window.  The model learns to distinguish
+    RTTY from NAVTEX by the step size (170 Hz vs 300 Hz) and from FSK by the
+    very narrow total deviation.
     """
     real_sps = max(4, int(SR / 45.45))   # ≈ 4400
     dev = 85.0 / SR
     n_syms = 12  # 12 * 4400 = 52800 samples >> n
     syms = rng.integers(0, 2, n_syms)
     freq_seq = np.repeat([dev if s else -dev for s in syms], real_sps)
-    off = int(rng.integers(0, len(freq_seq) - n)) if len(freq_seq) > n else 0
+    # Center window on a symbol boundary; force a tone change so the step is visible
+    k = int(rng.integers(1, n_syms))
+    syms[k] = 1 - syms[k - 1]
+    freq_seq = np.repeat([dev if s else -dev for s in syms], real_sps)
+    off = max(0, k * real_sps - n // 2)
+    off = min(off, len(freq_seq) - n)
     phase = np.cumsum(2 * math.pi * freq_seq[off:off + n])
     return _norm(np.exp(1j * phase).astype(np.complex64))
 
@@ -617,16 +756,22 @@ def _dsc(n: int, rng: np.random.Generator) -> np.ndarray:
 def _navtex(n: int, rng: np.random.Generator) -> np.ndarray:
     """NAVTEX: FSK 100 baud, ±150 Hz, SITOR-B, maritime safety 518 kHz.
 
-    sps=2000 means each symbol spans 2000 samples — longer than the 1024-sample
-    window. Generate a long sequence and take a random slice so both mark/space
-    and transitions are visible in training windows, not just the initial tone.
+    sps=2000 → 1024-sample window spans ~0.51 symbols, usually no transitions.
+    Same fix as RTTY: center the window on a symbol boundary to guarantee one
+    visible ±150 Hz frequency step.  The model distinguishes NAVTEX from RTTY by
+    step size (300 Hz vs 170 Hz) and from FSK by the very narrow total deviation.
     """
     sps = max(4, int(SR / 100.0))   # 2000 samples/symbol
     dev = 150.0 / SR
     n_syms = 12  # 12 * 2000 = 24000 samples >> n
     syms = rng.integers(0, 2, n_syms)
     freq_seq = np.repeat([dev if s else -dev for s in syms], sps)
-    off = int(rng.integers(0, len(freq_seq) - n)) if len(freq_seq) > n else 0
+    # Center window on a symbol boundary; force a tone change so the step is visible
+    k = int(rng.integers(1, n_syms))
+    syms[k] = 1 - syms[k - 1]
+    freq_seq = np.repeat([dev if s else -dev for s in syms], sps)
+    off = max(0, k * sps - n // 2)
+    off = min(off, len(freq_seq) - n)
     phase = np.cumsum(2 * math.pi * freq_seq[off:off + n])
     return _norm(np.exp(1j * phase).astype(np.complex64))
 
@@ -696,10 +841,10 @@ def _gen_one(cls: str, n: int, rng: np.random.Generator) -> np.ndarray:
     if cls == "4ASK":      return _ask(4,   n, rng, sps)
     if cls == "16ASK":     return _ask(16,  n, rng, max(sps, 6))
     if cls == "FSK":       return _fsk(2,   n, rng, sps)
-    if cls == "4FSK":      return _fsk(4,   n, rng, sps)
+    if cls == "4FSK":      return _fsk(4,   n, rng, sps, 4000.0 / 3)  # outer ±4000 Hz (vs 8FSK ±8000)
     if cls == "8FSK":      return _fsk(8,   n, rng, max(sps, 6))
     if cls == "MSK":       return _fsk(2,   n, rng, sps, SR / (4 * sps))  # MI=0.5: dev=baud/4
-    if cls == "GFSK":      return _gfsk(2,  n, rng, sps, SR * 0.05, float(rng.uniform(0.3, 0.6)))
+    if cls == "GFSK":      return _gfsk(2,  n, rng, min(sps, 6), SR * 0.05, float(rng.uniform(0.3, 0.6)))
     if cls == "GMSK":      return _gfsk(2,  n, rng, sps, SR / (4 * sps), 0.3)  # MI=0.5, BT=0.3
     # Per-order PSK rolloff gives spectral BW cue — higher order → tighter rolloff (spec-efficient)
     if cls == "BPSK":      return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.30, 0.50)))
@@ -756,7 +901,7 @@ def _gen_one(cls: str, n: int, rng: np.random.Generator) -> np.ndarray:
 
 def generate(n_per_snr: int, length: int,
              snr_min: float, snr_max: float, snr_step: float,
-             seed: int, impair: bool = True,
+             seed: int, impair: bool = True, multi_sdr: bool = False,
              filter_classes: list[str] | None = None) -> tuple:
     classes = [c for c in CLASS_NAMES if filter_classes is None or c in filter_classes]
     if filter_classes:
@@ -777,7 +922,7 @@ def generate(n_per_snr: int, length: int,
             for _ in range(n_per_snr):
                 iq = _gen_one(cls, length, rng)
                 if impair:
-                    iq = _impair(iq, rng)
+                    iq = _impair_multi_sdr(iq, rng) if multi_sdr else _impair(iq, rng)
                 iq = _awgn(iq, float(snr), rng)
                 X[idx, 0] = iq.real
                 X[idx, 1] = iq.imag
@@ -800,6 +945,9 @@ def main() -> None:
     ap.add_argument("--snr-step",  type=float, default=5.0)
     ap.add_argument("--seed",           type=int,   default=42)
     ap.add_argument("--no-impair",      action="store_true")
+    ap.add_argument("--multi-sdr",      action="store_true",
+                    help="Randomize impairments across Pluto/HackRF/RTL-SDR/clean/OTA "
+                         "device profiles per sample, instead of PlutoSDR-only")
     ap.add_argument("--filter-classes", nargs="+",  metavar="CLS",
                     help="Only generate these classes (subset of the 28)")
     args = ap.parse_args()
@@ -807,10 +955,12 @@ def main() -> None:
     filter_cls = args.filter_classes or None
     n_cls = len(filter_cls) if filter_cls else len(CLASS_NAMES)
     print(f"Generating {args.n} × {n_cls} classes × SNR {args.snr_min}:{args.snr_step}:{args.snr_max} dB")
+    if args.multi_sdr:
+        print(f"  Multi-SDR impairments: {', '.join(_SDR_PROFILE_NAMES)}")
     X, y, snrs, cls = generate(
         n_per_snr=args.n, length=args.len,
         snr_min=args.snr_min, snr_max=args.snr_max, snr_step=args.snr_step,
-        seed=args.seed, impair=not args.no_impair,
+        seed=args.seed, impair=not args.no_impair, multi_sdr=args.multi_sdr,
         filter_classes=filter_cls,
     )
     print(f"\nTotal: {len(X):,}  shape={X.shape}  ({X.nbytes/1e9:.2f} GB)")

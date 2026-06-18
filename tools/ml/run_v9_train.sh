@@ -9,34 +9,34 @@
 # Do not use for commercial, organizational, or military purposes.
 # ========================================================================
 
-# run_v8_train.sh — Fine-tunes from the best of v6/v7, adding real captured
-# IQ (data/real_combined_1024.npz, produced by prep_real_v8.py — 223,914
-# windows across FM_WB/AM_DSB/FSK/FM_NB/GMSK/OFDM/GFSK, FFT-resampled from
-# 512 to 1024 samples to match the synthetic window length) alongside the
-# existing v6 synthetic data/holdout.
+# run_v9_train.sh — Fine-tunes from the best of v7/v8, adding
+# data/synth_v9_47class_1024.npz (seed=2222, generate_v3.py --multi-sdr —
+# randomizes impairments per-sample across Pluto/HackRF/RTL-SDR/clean/OTA
+# device profiles, for cross-device generalization) alongside the existing
+# v6 synthetic data, the real captured IQ, and v6 holdout.
 #
-# RESUME_CKPT below must be set to whichever of v6/amr_cnn_v6_47class.best.pt
-# or amr_cnn_v7_47class.best.pt has the higher eval_holdout.py overall_acc —
+# RESUME_CKPT below must be set to whichever of v7/amr_cnn_v7_47class.best.pt
+# or amr_cnn_v8_47class.best.pt has the higher eval_holdout.py overall_acc —
 # update before launching.
 
 set -euo pipefail
 cd /home/brendan/AnalysisApp/tools/ml
-LOG=/tmp/train_v8.log
+LOG=/tmp/train_v9.log
 exec >> "$LOG" 2>&1
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
-# v7 (59.5%) vs v6 (59.8%) on v6_holdout_1024.npz — essentially tied overall,
-# but v7 fixed more of its targeted weak classes (TONE/GFSK/32PSK/ACARS/DSC/
-# DTMF/NAVTEX all +5 to +18pp) at the cost of regressing AM_DSB/MSK. Resuming
-# from v7; the real captured IQ added here includes AM_DSB/FM_NB/GMSK samples
-# that may help recover those regressions.
 RESUME_CKPT="models/amr_cnn_v7_47class.best.pt"
 
 echo ""
 echo "════════════════════════════════════════"
-echo "v8 pipeline starting: $(ts)"
+echo "v9 pipeline starting: $(ts)"
 echo "════════════════════════════════════════"
+
+if [[ ! -f data/synth_v9_47class_1024.npz ]]; then
+    echo "[$(ts)] data/synth_v9_47class_1024.npz missing — run generate_v3.py --multi-sdr first"
+    exit 1
+fi
 
 if [[ ! -f data/real_combined_1024.npz ]]; then
     echo "[$(ts)] data/real_combined_1024.npz missing — run prep_real_v8.py first"
@@ -50,9 +50,9 @@ if [[ -f data/noise_bank.npz ]]; then
 fi
 
 echo ""
-echo "[$(ts)] Starting v8 training (fine-tune from $RESUME_CKPT, + real captured IQ)..."
+echo "[$(ts)] Starting v9 training (fine-tune from $RESUME_CKPT, + multi-SDR synthetic + real captured IQ)..."
 .venv/bin/python3 -u train.py \
-    --npz data/synth_v6_47class_1024.npz data/real_combined_1024.npz \
+    --npz data/synth_v6_47class_1024.npz data/synth_v9_47class_1024.npz data/real_combined_1024.npz \
     --val-npz data/v6_holdout_1024.npz \
     $NOISE_ARG \
     --resume "$RESUME_CKPT" \
@@ -70,19 +70,19 @@ echo "[$(ts)] Starting v8 training (fine-tune from $RESUME_CKPT, + real captured
     --max-per-class 15000 \
     --snr-min -10 \
     --cuda \
-    --out models/amr_cnn_v8_47class.onnx
+    --out models/amr_cnn_v9_47class.onnx
 
 # ── Holdout eval ──────────────────────────────────────────────────────────────
 echo ""
 echo "[$(ts)] Running holdout eval..."
 .venv/bin/python3 eval_holdout.py \
-    --model models/amr_cnn_v8_47class.onnx \
-    --classes models/amr_cnn_v8_47class.classes.json \
+    --model models/amr_cnn_v9_47class.onnx \
+    --classes models/amr_cnn_v9_47class.classes.json \
     --holdout data/v6_holdout_1024.npz
 
 echo ""
 echo "════════════════════════════════════════"
-echo "v8 pipeline DONE: $(ts)"
+echo "v9 pipeline DONE: $(ts)"
 echo "════════════════════════════════════════"
 
 # ========================================================================

@@ -185,31 +185,66 @@ class RadioResNet(nn.Module):
         return self.head(x)
 
 
-# ── IQ + spectrogram fusion model ────────────────────────────────────────────
-# Combines raw IQ path + STFT magnitude spectrogram path.
-# Useful for signals where spectral shape is the most discriminative feature.
+# ── Gradient Reversal Layer (DANN domain adaptation) ─────────────────────────
+
+class _GRL(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, alpha: float) -> torch.Tensor:
+        ctx.alpha = alpha
+        return x.clone()
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return -ctx.alpha * grad_output, None
+
+
+def grad_reverse(x: torch.Tensor, alpha: float = 1.0) -> torch.Tensor:
+    return _GRL.apply(x, alpha)
+
+
+# ── IQ + spectrogram + instantaneous-features fusion model ───────────────────
 
 class RadioFusion(nn.Module):
     """
-    Dual-path model:
-      Path A: RadioResNet on raw IQ (time-domain)
-      Path B: ResNet-style on STFT magnitude spectrogram (frequency-domain)
-    Outputs are concatenated and fed to a final classifier.
+    Triple-path model:
+      Path A: RadioResNet on raw IQ (time-domain), channels=128 n_blocks=8
+              — matches v10/v11 checkpoint for weight loading
+      Path B: 2D CNN on STFT log-magnitude spectrogram (frequency-domain)
+      Path C: 1D CNN on instantaneous amplitude / phase / frequency (IA/IP/IF)
+              — directly encodes what a human demodulator would compute;
+                FM vs AM diverge in IF, PSK orders diverge in IP trajectory
+
+    Also computes 4 higher-order cumulant features (C20, C42, C40, C4P)
+    fed through a small MLP — analytically optimal for distinguishing QAM
+    orders and PSK constellation sizes.
+
+    The shared 256-dim hidden representation supports DANN domain adaptation
+    via forward_dann(): a gradient-reversal layer drives the feature extractor
+    to be domain-invariant between synthetic (label=0) and real (label=1) data,
+    directly closing the synthetic-to-real accuracy gap.
+
+    Weight loading from v11 checkpoints (strict=False):
+      iq_path.*, spec_path.*  → loaded (shape-compatible)
+      inst_path, cumulant_head, fusion_hidden, fusion_out,
+      domain_classifier       → randomly initialised (new or reshaped)
     """
 
+    IQ_CHANNELS = 128   # must match v10/v11 checkpoint
+    INST_FEAT   = 64    # instantaneous features path output dim
+    CUM_FEAT    = 32    # cumulant MLP output dim
+
     def __init__(self, num_classes: int = 24, input_len: int = 1024,
-                 n_fft: int = 64):
+                 n_fft: int = 256):
         super().__init__()
-        self.n_fft     = n_fft
-        self.hop_len   = n_fft // 2
+        self.n_fft   = n_fft
+        self.hop_len = n_fft // 4
 
-        # IQ path
-        self.iq_path   = RadioResNet(num_classes=256, input_len=input_len,
-                                     channels=128, n_blocks=6)
-        self.iq_path.head = nn.Identity()   # remove final classifier
+        # Path A: IQ residual network (weights transfer from v10/v11)
+        self.iq_path = RadioResNet(num_classes=num_classes, input_len=input_len,
+                                   channels=self.IQ_CHANNELS, n_blocks=8)
+        self.iq_path.head = nn.Flatten()   # strip classifier head → (B, IQ_CHANNELS)
 
-        # Spectrogram path
-        spec_time = input_len // self.hop_len
+        # Path B: STFT spectrogram
         self.spec_path = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
@@ -221,20 +256,49 @@ class RadioFusion(nn.Module):
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool2d((4, 4)),
             nn.Flatten(),
-            nn.Linear(128*16, 256),
+            nn.Linear(128 * 16, 256),
             nn.ReLU(inplace=True),
         )
 
-        # Fusion
-        self.fusion = nn.Sequential(
-            nn.Linear(128 + 256, 256),
+        # Path C: instantaneous amplitude / phase / frequency
+        self.inst_path = nn.Sequential(
+            nn.Conv1d(3, 32, kernel_size=7, padding=3),
+            nn.BatchNorm1d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(2),
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.BatchNorm1d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(2),
+            nn.Conv1d(64, self.INST_FEAT, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+        )
+
+        # Higher-order cumulant features (4 scalars → CUM_FEAT)
+        self.cumulant_head = nn.Sequential(
+            nn.Linear(4, self.CUM_FEAT),
+            nn.ReLU(inplace=True),
+        )
+
+        # Fusion: concat all paths → 256-dim hidden → class logits
+        total = self.IQ_CHANNELS + 256 + self.INST_FEAT + self.CUM_FEAT  # 480
+        self.fusion_hidden = nn.Sequential(
+            nn.Linear(total, 256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.4),
-            nn.Linear(256, num_classes),
+        )
+        self.fusion_out = nn.Linear(256, num_classes)
+
+        # DANN domain classifier — only used via forward_dann() during training
+        self.domain_classifier = nn.Sequential(
+            nn.Linear(256, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 2),   # 0=synthetic, 1=real
         )
 
     def _spectrogram(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 2, N) → complex → STFT magnitude (B, 1, F, T)
         iq = torch.complex(x[:, 0, :], x[:, 1, :])
         window = torch.hann_window(self.n_fft, device=x.device)
         spec = torch.stft(
@@ -243,15 +307,46 @@ class RadioFusion(nn.Module):
             win_length=self.n_fft, window=window,
             return_complex=True,
         )
-        mag = spec.abs().unsqueeze(1)   # (B, 1, F, T)
-        return (mag + 1e-6).log()
+        return (spec.abs().unsqueeze(1) + 1e-6).log()   # (B, 1, F, T)
+
+    def _inst_features(self, x: torch.Tensor) -> torch.Tensor:
+        sig = torch.complex(x[:, 0, :], x[:, 1, :])          # (B, N)
+        ia  = sig.abs()                                        # (B, N)
+        ip  = torch.angle(sig)                                 # (B, N)
+        dip = ip[:, 1:] - ip[:, :-1]                          # (B, N-1)
+        dip = dip - 2.0 * torch.pi * torch.round(dip / (2.0 * torch.pi))
+        dip = torch.cat([dip[:, :1], dip], dim=1)             # (B, N)
+        feats = torch.stack([ia, ip, dip], dim=1)             # (B, 3, N)
+        mu  = feats.mean(dim=-1, keepdim=True)
+        std = feats.std(dim=-1, keepdim=True).clamp(min=1e-6)
+        return (feats - mu) / std
+
+    def _cumulants(self, x: torch.Tensor) -> torch.Tensor:
+        sig = torch.complex(x[:, 0, :], x[:, 1, :])              # (B, N)
+        p   = sig.abs().pow(2).mean(-1).clamp(min=1e-8)          # (B,) power
+        c20 = sig.pow(2).mean(-1).abs() / p                      # ~0 circular, ~1 real-valued (AM)
+        c42 = sig.abs().pow(4).mean(-1) / p.pow(2) - 2.0        # amplitude kurtosis (QAM32 vs QAM64)
+        c40 = sig.pow(4).mean(-1).abs() / p.pow(2)              # 4th-order mag (large for PSK)
+        c4p = torch.cos(4.0 * torch.angle(sig)).mean(-1).abs()  # phase 4th-moment (PSK order)
+        return torch.stack([c20, c42, c40, c4p], dim=1)          # (B, 4)
+
+    def _extract(self, x: torch.Tensor) -> torch.Tensor:
+        """Shared feature extraction → 256-dim hidden representation."""
+        iq_feat   = self.iq_path(x)                              # (B, 128)
+        spec_feat = self.spec_path(self._spectrogram(x))         # (B, 256)
+        inst_feat = self.inst_path(self._inst_features(x))       # (B, 64)
+        cum_feat  = self.cumulant_head(self._cumulants(x))       # (B, 32)
+        fused     = torch.cat([iq_feat, spec_feat, inst_feat, cum_feat], dim=1)
+        return self.fusion_hidden(fused)                          # (B, 256)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        iq_feat   = self.iq_path(x)          # (B, 128)
-        spec      = self._spectrogram(x)     # (B, 1, F, T)
-        spec_feat = self.spec_path(spec)     # (B, 256)
-        fused     = torch.cat([iq_feat, spec_feat], dim=1)
-        return self.fusion(fused)
+        return self.fusion_out(self._extract(x))
+
+    def forward_dann(self, x: torch.Tensor,
+                     alpha: float = 1.0) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (class_logits, domain_logits) for DANN training."""
+        h = self._extract(x)
+        return self.fusion_out(h), self.domain_classifier(grad_reverse(h, alpha))
 
 
 # ── ONNX export helper ────────────────────────────────────────────────────────
