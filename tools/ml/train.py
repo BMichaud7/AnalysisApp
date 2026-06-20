@@ -152,6 +152,36 @@ def build_tensors(args) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
             "  --data HDF5  --npz FILE  --hf-dataset ID  --synthetic N"
         )
 
+    # ── Family specialist: keep only this family's classes ──────────────────
+    if getattr(args, "family", None):
+        from family_map import CLASS_FAMILY
+        fam = args.family.upper()
+        before = len(all_samples)
+        all_samples = [s for s in all_samples if CLASS_FAMILY.get(s.ground_truth) == fam]
+        if not all_samples:
+            raise RuntimeError(
+                f"No samples found for family '{fam}'. "
+                f"Valid families: {sorted(set(CLASS_FAMILY.values()))}"
+            )
+        print(f"  Family filter '{fam}': {before:,} → {len(all_samples):,} samples")
+        class_names = None  # let samples_to_tensors derive from the filtered set
+
+    # ── Router: relabel each sample to its coarse family ────────────────────
+    if getattr(args, "router", False):
+        from family_map import CLASS_FAMILY, FAMILY_NAMES
+        before = len(all_samples)
+        relabeled = []
+        for s in all_samples:
+            fam = CLASS_FAMILY.get(s.ground_truth)
+            if fam is None:
+                continue
+            s.ground_truth = fam
+            relabeled.append(s)
+        all_samples = relabeled
+        print(f"  Router relabel: {before:,} → {len(all_samples):,} samples "
+              f"across {len(FAMILY_NAMES)} families")
+        class_names = FAMILY_NAMES  # fixed order, independent of what's present
+
     print(f"Total samples: {len(all_samples)}")
     X, y, cn = samples_to_tensors(all_samples, class_names)
     print(f"  Input shape: {X.shape}  Classes: {len(cn)}")
@@ -500,6 +530,14 @@ def main() -> None:
     # ── Filters ───────────────────────────────────────────────────────────────
     ap.add_argument("--snr-min",       type=float, default=-20)
     ap.add_argument("--max-per-class", type=int,   default=10000)
+    ap.add_argument("--family",        default=None, metavar="NAME",
+                    help="Train a specialist on only this family's classes "
+                         "(see family_map.py, e.g. QAM, PSK, FSK, AM). "
+                         "Mutually exclusive with --router.")
+    ap.add_argument("--router",        action="store_true",
+                    help="Train a coarse family router: labels become the "
+                         "9 family names instead of fine-grained classes. "
+                         "Mutually exclusive with --family.")
 
     # ── Model ─────────────────────────────────────────────────────────────────
     ap.add_argument("--model",   default="resnet",
@@ -544,6 +582,11 @@ def main() -> None:
                     help="Oversample PSK/QAM hard classes by FACTOR via WeightedRandomSampler.")
     ap.add_argument("--boost-qam", type=float, default=None, metavar="FACTOR",
                     help="(deprecated) Use --boost-hard instead.")
+    ap.add_argument("--boost-only", default=None, metavar="NAME[,NAME...]",
+                    help="With --boost-hard, restrict the boost to exactly these "
+                         "class/family names (comma-separated, exact match) instead "
+                         "of the hardcoded HARD_CLASSES set. For targeting one "
+                         "specific weak family without touching others' sampling.")
     ap.add_argument("--augment",   action="store_true",
                     help="Apply online IQ channel augmentation during training "
                          "(phase, IQ imbalance, AWGN). Strongly recommended.")
@@ -560,6 +603,14 @@ def main() -> None:
                          "When --augment is also set, replaces synthetic AWGN with real "
                          "PlutoSDR hardware noise during IQ augmentation.")
     args = ap.parse_args()
+
+    if args.family and args.router:
+        ap.error("--family and --router are mutually exclusive")
+    if args.family:
+        from family_map import CLASS_FAMILY
+        valid = sorted(set(CLASS_FAMILY.values()))
+        if args.family.upper() not in valid:
+            ap.error(f"--family '{args.family}' not recognised. Valid: {valid}")
 
     device = torch.device(
         "cuda" if args.cuda and torch.cuda.is_available() else "cpu"
@@ -609,8 +660,12 @@ def main() -> None:
         vd  = np.load(args.val_npz)
         vX  = torch.from_numpy(vd["X"]).float()
         vy_raw = vd["y"]
-        # Remap holdout labels to match this run's class_names order
+        # Remap holdout labels to match this run's class_names order. Router
+        # mode maps each holdout mod name to its family name first.
         h_classes = list(vd["classes"])
+        if args.router:
+            from family_map import CLASS_FAMILY
+            h_classes = [CLASS_FAMILY.get(c, c) for c in h_classes]
         label_map = {h_classes[i]: class_names.index(h_classes[i])
                      for i in range(len(h_classes)) if h_classes[i] in class_names}
         vy = torch.tensor([label_map.get(h_classes[int(l)], -1) for l in vy_raw],
@@ -648,8 +703,12 @@ def main() -> None:
                      if domain_tensor is not None else train_ds)
 
     if boost_factor and boost_factor > 1.0:
-        hard_idx     = {i for i, n in enumerate(class_names) if n in HARD_CLASSES
-                        or "QAM" in n or "PSK" in n}
+        if args.boost_only:
+            only_names = {s.strip() for s in args.boost_only.split(",")}
+            hard_idx   = {i for i, n in enumerate(class_names) if n in only_names}
+        else:
+            hard_idx   = {i for i, n in enumerate(class_names) if n in HARD_CLASSES
+                          or "QAM" in n or "PSK" in n}
         train_labels = y[train_ds.indices]
         sample_w = torch.where(
             torch.tensor([int(l) in hard_idx for l in train_labels]),
