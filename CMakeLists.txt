@@ -226,7 +226,15 @@ else()
     target_link_libraries(analysis_lib PUBLIC PkgConfig::PROTON)
 endif()
 
-target_compile_options(analysis_lib PRIVATE -O2 -march=native)
+# -march=native is unsafe for release binaries: CI runners (e.g. Ampere
+# aarch64 with ARMv8.1+ LSE atomics) support instructions that crash with
+# SIGILL on deploy targets like the Raspberry Pi 4 (Cortex-A72, ARMv8.0-A).
+# Use a portable baseline instead.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    target_compile_options(analysis_lib PRIVATE -O2 -march=armv8-a)
+else()
+    target_compile_options(analysis_lib PRIVATE -O2 -march=x86-64-v2)
+endif()
 target_compile_definitions(analysis_lib PRIVATE
     SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_DEBUG
 )
