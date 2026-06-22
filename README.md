@@ -447,6 +447,30 @@ python train.py --data /data/RML2018.01a.hdf5 \
 
 The exported `.onnx` file and companion `.classes.json` are loaded by `OnnxClassifier` in the C++ service when built with `-DWITH_ONNX=ON`.
 
+### Getting trained models without training them yourself
+
+Trained models aren't tracked in git (`.pt` checkpoints are gitignored;
+`.onnx` files are large binaries too) and there's no automatic deploy step
+that pushes them anywhere — they live in `tools/ml/models/` on whichever
+machine trained them until someone explicitly publishes a snapshot.
+
+```bash
+# Publish everything currently in tools/ml/models/ as a new release:
+tools/ml/publish_models_release.sh
+
+# Download the latest published snapshot instead of training:
+gh release list --repo OpenRFStack/AnalysisApp | grep ^models-
+gh release download <tag> --repo OpenRFStack/AnalysisApp --dir tools/ml/models/
+```
+
+Releases are tagged `models-<timestamp>` — deliberately separate from
+`latest-main`, which is the CI-built RPM binaries the product containers
+pull at startup (see `SdrScripts/deploy/*/entrypoint.sh`), so a model drop
+never collides with or gets mistaken for a binary build. There's no fixed
+versioning scheme beyond the timestamp yet; check the release notes (a
+file listing with sizes) or `tools/ml/*.classes.json` to see what's in a
+given snapshot.
+
 ---
 
 ## Classification Path
