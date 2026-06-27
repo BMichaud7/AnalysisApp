@@ -109,10 +109,8 @@ public:
             msg.body(msg_body);
             msg.content_type("application/json");
             msg.reply_to(reply_addr_);
-            if (sender_ && sender_.credit() > 0)
-                sender_.send(msg);
-            else
-                spdlog::warn("[IqTaskChannel] no credit — task dropped");
+            // Do NOT check credit() — proton queues when credit arrives.
+            if (sender_) sender_.send(msg);
         });
         std::unique_lock<std::mutex> lk(mu_);
         result_cv_.wait_for(lk, milliseconds(timeout_ms),
@@ -128,8 +126,7 @@ public:
             proton::message msg;
             msg.body(msg_body);
             msg.content_type("application/json");
-            if (sender_ && sender_.credit() > 0)
-                sender_.send(msg);
+            if (sender_) sender_.send(msg);
         });
     }
 

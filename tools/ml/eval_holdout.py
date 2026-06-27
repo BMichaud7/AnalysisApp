@@ -128,9 +128,13 @@ def evaluate(sess: ort.InferenceSession,
              model_classes: list[str],
              npz_path: str,
              tta: int = 1,
-             hierarchical: bool = False) -> dict:
+             hierarchical: bool = False,
+             router: bool = False) -> dict:
     d = np.load(npz_path, allow_pickle=True)
     holdout_classes = [str(c) for c in d["classes"]]
+    if router:
+        from family_map import CLASS_FAMILY
+        holdout_classes = [CLASS_FAMILY.get(c, c) for c in holdout_classes]
     X, y_raw, snrs = d["X"], d["y"], d["snrs"]
 
     # Build index map: holdout label → model label (skip unknown)
@@ -212,7 +216,13 @@ def main() -> None:
                     help="Family-gated argmax: pick best class within predicted "
                          "modulation family (QAM/PSK/FSK/AM/FM/etc) rather than "
                          "flat 47-class argmax. Reduces inter-family confusion.")
+    ap.add_argument("--router", action="store_true",
+                    help="Evaluate a family router model (trained with "
+                         "train.py --router): holdout per-class labels are "
+                         "mapped to family names before scoring.")
     args = ap.parse_args()
+    if args.hierarchical and args.router:
+        ap.error("--hierarchical and --router are mutually exclusive")
 
     model_classes = json.load(open(args.classes))
     print(f"Model: {args.model}  ({len(model_classes)} classes)")
@@ -225,7 +235,7 @@ def main() -> None:
             print(f"WARNING: {npz} not found, skipping", file=sys.stderr)
             continue
         r = evaluate(sess, model_classes, npz, tta=args.tta,
-                     hierarchical=args.hierarchical)
+                     hierarchical=args.hierarchical, router=args.router)
         print_report(r)
         results.append(r)
 

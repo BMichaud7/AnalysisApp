@@ -186,7 +186,7 @@ public:
         if (!work_queue_) return;
         std::string body_copy = body;
         work_queue_->add([this, body_copy]{
-            if (pub_sender_ && pub_sender_.credit() > 0) {
+            if (pub_sender_) {
                 proton::message msg;
                 msg.body(body_copy);
                 msg.content_type("application/json");
@@ -200,14 +200,12 @@ public:
         if (!work_queue_) return;
         std::string b = body;
         work_queue_->add([this, b]() mutable {
-            if (demod_sender_ && demod_sender_.credit() > 0) {
+            if (demod_sender_) {
                 proton::message msg;
                 msg.body(b);
                 msg.content_type("application/json");
                 msg.durable(false);
                 demod_sender_.send(msg);
-            } else {
-                spdlog::warn("AnalysisService: demod sender not ready, dropping DEMOD_REQUEST");
             }
         });
     }

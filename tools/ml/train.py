@@ -389,7 +389,6 @@ def train(model:          nn.Module,
         fam_proj = family_proj.to(device)
         print(f"  Family aux loss weight: {family_aux_weight} "
               f"({fam_proj.shape[1]} families)")
-    best_score  = 0.0   # composite: 0.7*val_acc + 0.3*min_class
     best_state  = None
     # Use the model's actual output dimension, not the first-batch max label.
     # The first-batch approach can under-count when rare classes don't appear
@@ -401,6 +400,38 @@ def train(model:          nn.Module,
         augment = augment.to(device).train()
 
     use_dann = dann_weight > 0.0 and hasattr(model, "forward_dann")
+
+    def eval_per_acc(m: nn.Module) -> torch.Tensor:
+        m.eval()
+        per_correct = torch.zeros(num_classes)
+        per_total   = torch.zeros(num_classes)
+        with torch.no_grad():
+            for X_b, y_b in val_loader:
+                X_b, y_b = X_b.to(device), y_b.to(device)
+                preds = m(X_b).argmax(dim=1).cpu()
+                y_cpu = y_b.cpu()
+                for c in range(num_classes):
+                    mask = y_cpu == c
+                    per_correct[c] += (preds[mask] == c).sum()
+                    per_total[c]   += mask.sum()
+        return per_correct / per_total.clamp(min=1)
+
+    # Floor checkpoint selection at the model's score BEFORE any fine-tuning.
+    # Without this, best_score started at 0.0 and a fine-tune step that never
+    # beat its own starting point would still overwrite ckpt_path with a
+    # WORSE model the moment epoch 1 scored > 0.0 -- silently regressing
+    # --resume chains step over step (confirmed live: a 9-step family
+    # fine-tune chain dropped 53.3% -> 51.7% -> 49.7% overall holdout
+    # accuracy across its first two steps, with the boosted family itself
+    # getting worse each time). Seeding best_state here also guarantees
+    # ckpt_path always gets written, even if every epoch underperforms —
+    # a failed fine-tune step is now a no-op, not a regression.
+    _per_acc0  = eval_per_acc(model)
+    best_score = 0.7 * _per_acc0.mean().item() + 0.3 * _per_acc0.min().item()
+    best_state = {k: v.clone() for k, v in model.state_dict().items()}
+    print(f"  Starting score (pre-finetune): {best_score:.3f}")
+    if ckpt_path:
+        torch.save(best_state, ckpt_path)
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -445,22 +476,9 @@ def train(model:          nn.Module,
         train_loss /= len(loader.dataset)
         sched.step()
 
-        model.eval()
         if augment is not None:
             augment.eval()
-        per_correct = torch.zeros(num_classes)
-        per_total   = torch.zeros(num_classes)
-        with torch.no_grad():
-            for X_b, y_b in val_loader:
-                X_b, y_b = X_b.to(device), y_b.to(device)
-                preds = model(X_b).argmax(dim=1).cpu()
-                y_cpu = y_b.cpu()
-                for c in range(num_classes):
-                    mask = y_cpu == c
-                    per_correct[c] += (preds[mask] == c).sum()
-                    per_total[c]   += mask.sum()
-
-        per_acc  = per_correct / per_total.clamp(min=1)
+        per_acc  = eval_per_acc(model)
         val_acc  = per_acc.mean().item()
         min_acc  = per_acc.min().item()
         cur_lr   = opt.param_groups[0]["lr"]
