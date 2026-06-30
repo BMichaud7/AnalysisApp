@@ -82,6 +82,8 @@ public:
         if (container_) {
             if (wq_)
                 wq_->add([this]{ sender_.connection().close(); });
+            else
+                container_->stop();
             if (thread_.joinable()) thread_.join();
             container_.reset();
         }

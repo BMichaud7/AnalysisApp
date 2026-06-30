@@ -20,11 +20,7 @@ Contact author for permission: https://github.com/OpenRFStack
 
 static std::atomic<bool> g_shutdown{false};
 
-static void signalHandler(int sig)
-{
-    spdlog::info("Signal {} received, shutting down…", sig);
-    g_shutdown.store(true);
-}
+static void signalHandler(int) { g_shutdown.store(true); }
 
 int main(int argc, char** argv)
 {
