@@ -143,10 +143,11 @@ OnnxResult OnnxClassifier::classify(const std::vector<float>& iq_cf32,
             input[L + i] = iq_cf32[i * 2 + 1];
         }
 
-        // Unit-power normalise (matches training preprocessing)
+        // Unit-power normalise: mean(I^2+Q^2) over L complex samples, matching
+        // datasets.py normalise() which uses np.mean(np.abs(iq)**2).
         float pwr = 0.f;
         for (float v : input) pwr += v * v;
-        pwr /= static_cast<float>(2 * L);
+        pwr /= static_cast<float>(L);
         if (pwr > 0.f) {
             float scale = 1.f / std::sqrt(pwr);
             for (float& v : input) v *= scale;
@@ -210,10 +211,10 @@ std::vector<OnnxResult> OnnxClassifier::classifyBatch(
                 dst_i[i] = iq[i * 2];
                 dst_q[i] = iq[i * 2 + 1];
             }
-            // Normalise per sample
+            // Normalise per sample: mean(I^2+Q^2) over L complex samples
             float pwr = 0.f;
             for (int i = 0; i < 2 * L; ++i) pwr += dst_i[i] * dst_i[i];
-            pwr /= static_cast<float>(2 * L);
+            pwr /= static_cast<float>(L);
             if (pwr > 0.f) {
                 float s = 1.f / std::sqrt(pwr);
                 for (int i = 0; i < 2 * L; ++i) dst_i[i] *= s;

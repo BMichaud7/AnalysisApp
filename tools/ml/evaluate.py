@@ -77,8 +77,8 @@ def onnx_predict(session: "ort.InferenceSession",
     preds = []
     for i in range(0, len(X), batch_size):
         batch = X[i:i + batch_size]
-        # Unit-power normalise (same as training)
-        pwr = batch.reshape(len(batch), -1).var(axis=1, keepdims=True)[:, :, None]
+        # Unit-power normalise: mean(I^2+Q^2) over L, matching datasets.py normalise()
+        pwr = (batch ** 2).sum(axis=1).mean(axis=1, keepdims=True)[:, :, np.newaxis]
         pwr = np.maximum(pwr, 1e-9)
         batch = batch / np.sqrt(pwr)
         out = session.run(None, {"iq_input": batch})[0]
