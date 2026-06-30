@@ -282,10 +282,14 @@ void AnalysisService::stop()
 
     q_cv_.notify_all();
 
-    // Close proton container via shared ptr
-    if (amqp_container_) {
-        amqp_container_->stop();
+    // Copy shared_ptr under q_mu_ to avoid data race with subscriptionLoop()
+    // assigning a new amqp_container_ between reconnect attempts.
+    std::shared_ptr<proton::container> c;
+    {
+        std::lock_guard<std::mutex> lk(q_mu_);
+        c = amqp_container_;
     }
+    if (c) c->stop();
 
     if (sub_thread_.joinable()) sub_thread_.join();
     for (auto& t : worker_threads_)
@@ -325,10 +329,18 @@ void AnalysisService::subscriptionLoop()
             onDemodCommand(msg_type, freq_hz, stream_id, req_id);
         };
         amqp_handler_ = std::make_shared<ServiceAmqpHandler>(cfg_.amqp, on_det, on_cmd);
-        amqp_container_ = std::make_shared<proton::container>(*amqp_handler_);
+        std::shared_ptr<proton::container> container;
+        {
+            // Guard the assignment so stop() always sees a consistent value when
+            // it copies amqp_container_ under q_mu_.
+            std::lock_guard<std::mutex> lk(q_mu_);
+            if (!running_.load()) break;
+            amqp_container_ = std::make_shared<proton::container>(*amqp_handler_);
+            container = amqp_container_;
+        }
 
         try {
-            amqp_container_->run();
+            container->run();
         } catch (const std::exception& ex) {
             spdlog::error("AnalysisService: AMQP container exception: {}", ex.what());
         }
