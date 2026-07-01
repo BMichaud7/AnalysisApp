@@ -664,7 +664,10 @@ def main() -> None:
             print(f"  Domain labels: {len(X) - n_real:,} synthetic, {n_real:,} real")
 
     # ── Split ─────────────────────────────────────────────────────────────────
-    dataset = TensorDataset(X, y)
+    # Include domain labels as batch[2] so the DANN training loop sees them.
+    # Without this, d_b is always None and DANN loss is silently skipped.
+    dataset = TensorDataset(X, y) if domain_tensor is None \
+              else TensorDataset(X, y, domain_tensor)
     import torch as _torch
     _use_gpu = args.cuda and _torch.cuda.is_available()
     kw = dict(batch_size=args.batch,
