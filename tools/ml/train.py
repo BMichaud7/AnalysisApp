@@ -406,7 +406,7 @@ def train(model:          nn.Module,
         per_correct = torch.zeros(num_classes)
         per_total   = torch.zeros(num_classes)
         with torch.no_grad():
-            for X_b, y_b in val_loader:
+            for X_b, y_b, *_ in val_loader:
                 X_b, y_b = X_b.to(device), y_b.to(device)
                 preds = m(X_b).argmax(dim=1).cpu()
                 y_cpu = y_b.cpu()
