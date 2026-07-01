@@ -305,9 +305,9 @@ class IqAugment(nn.Module):
 
         iq += noise
 
-        # Re-normalise to unit peak
-        scale = iq.abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
-        iq    = iq / scale
+        # Re-normalise to unit power — matches evaluate.py and OnnxClassifier.cpp
+        pwr = iq.abs().pow(2).mean(dim=1, keepdim=True).clamp(min=1e-8)
+        iq  = iq / pwr.sqrt()
 
         X_aug = torch.stack([iq.real, iq.imag], dim=1)
         mask  = (torch.rand(B, device=device) < self.p).view(B, 1, 1)

@@ -29,7 +29,7 @@ exec >> "$LOG" 2>&1
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
-RESUME_CKPT="models/amr_cnn_v11_47class.best.pt"
+RESUME_CKPT="models/amr_cnn_v11_hardboost.best.pt"
 
 echo ""
 echo "════════════════════════════════════════"
@@ -59,7 +59,7 @@ echo "[$(ts)] Starting v12 training (RadioFusion + IF/IA/IP path + cumulants + D
     --label-smoothing 0.08 \
     --augment \
     --no-mixup \
-    --boost-hard 4.0 \
+    --boost-hard 1.5 \
     --max-per-class 20000 \
     --snr-min -10 \
     --n-fft 256 \
@@ -107,7 +107,7 @@ echo "[$(ts)] Ensemble eval (v9 + v10 + v11 + v12, hierarchical + TTA=8)..."
 .venv/bin/python3 ensemble_eval.py \
     --models models/amr_cnn_v9_47class.onnx \
              models/amr_cnn_v10_47class.onnx \
-             models/amr_cnn_v11_47class.onnx \
+             models/amr_cnn_v11_hardboost.onnx \
              models/amr_cnn_v12_47class.onnx \
     --classes models/amr_cnn_v12_47class.classes.json \
     --holdout data/v6_holdout_v2_1024.npz \
