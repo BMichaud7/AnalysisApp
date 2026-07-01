@@ -29,7 +29,11 @@ exec >> "$LOG" 2>&1
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
-RESUME_CKPT="models/amr_cnn_v11_hardboost.best.pt"
+# v11_hardboost collapsed (36% accuracy on synth_v9 holdout, SNR≥0 dB):
+# --boost-hard 4.0 caused model to predict 4ASK/LFM/DMR/DSTAR for nearly
+# everything.  Resume from v10 (proven baseline) instead so v12 inherits
+# a healthy IQ-path and trains the new RadioFusion paths from scratch.
+RESUME_CKPT="models/amr_cnn_v10_47class.best.pt"
 
 echo ""
 echo "════════════════════════════════════════"
@@ -37,7 +41,7 @@ echo "v12 pipeline starting: $(ts)"
 echo "════════════════════════════════════════"
 
 if [[ ! -f "$RESUME_CKPT" ]]; then
-    echo "[$(ts)] $RESUME_CKPT missing — v11 must finish before launching v12"
+    echo "[$(ts)] $RESUME_CKPT missing"
     exit 1
 fi
 
@@ -103,11 +107,11 @@ echo "[$(ts)] Holdout eval — hierarchical + TTA=8 (best)..."
     --tta 8 --hierarchical
 
 echo ""
-echo "[$(ts)] Ensemble eval (v9 + v10 + v11 + v12, hierarchical + TTA=8)..."
+echo "[$(ts)] Ensemble eval (v9 + v10 + v12, hierarchical + TTA=8)..."
+# v11_hardboost excluded: collapsed at 36% overall (see eval results Jul 2026).
 .venv/bin/python3 ensemble_eval.py \
     --models models/amr_cnn_v9_47class.onnx \
              models/amr_cnn_v10_47class.onnx \
-             models/amr_cnn_v11_hardboost.onnx \
              models/amr_cnn_v12_47class.onnx \
     --classes models/amr_cnn_v12_47class.classes.json \
     --holdout data/v6_holdout_v2_1024.npz \
