@@ -118,12 +118,18 @@ public:
         if (s.target().address() == cfg_.analysis_topic) {
             pub_sender_ = s;
             std::lock_guard<std::mutex> lk(pub_ready_mu_);
+            // Set work_queue_ inside the lock so publish() cannot wake from
+            // wait_for(pub_ready_==true) and see a null work_queue_.
+            if (!work_queue_) work_queue_ = &s.work_queue();
             pub_ready_ = true;
             pub_ready_cv_.notify_all();
         } else {
             demod_sender_ = s;
+            if (!work_queue_) {
+                std::lock_guard<std::mutex> lk(pub_ready_mu_);
+                if (!work_queue_) work_queue_ = &s.work_queue();
+            }
         }
-        if (!work_queue_) work_queue_ = &s.work_queue();
     }
 
     void on_message(proton::delivery& d, proton::message& m) override {
