@@ -763,6 +763,13 @@ def main() -> None:
         print(f"  Resuming from {args.resume}")
         ckpt = torch.load(args.resume, map_location=device, weights_only=True)
         current = model.state_dict()
+        # When resuming a RadioResNet checkpoint (keys: stem.*, blocks.*, head.*)
+        # into RadioFusion (which wraps RadioResNet as iq_path.*), the key prefix
+        # mismatch means zero weights transfer without remapping. Detect this by
+        # checking whether any raw checkpoint key exists in the current model.
+        if args.model == 'fusion' and not any(k in current for k in ckpt):
+            print("  Remapping RadioResNet checkpoint keys → iq_path.* for RadioFusion")
+            ckpt = {f'iq_path.{k}': v for k, v in ckpt.items()}
         # Keep only layers whose shape matches — mismatch happens when num_classes
         # differs between the checkpoint and the current model (e.g. 24→28 classes).
         compatible = {k: v for k, v in ckpt.items()
