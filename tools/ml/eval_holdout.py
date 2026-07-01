@@ -144,10 +144,16 @@ def evaluate(sess: ort.InferenceSession,
             hmap[hi] = model_classes.index(cls)
 
     mask = np.isin(y_raw, list(hmap.keys()))
-    X_f   = X[mask]
+    X_f   = X[mask].astype(np.float32)
     y_h   = y_raw[mask]
     snrs_f = snrs[mask]
     y_m   = np.array([hmap[h] for h in y_h], dtype=np.int64)
+
+    # Unit-power normalisation: matches train.py samples_to_tensors(), evaluate.py,
+    # and OnnxClassifier.cpp.  NPZ stores raw post-AWGN IQ whose power scales with
+    # SNR; without this the model sees out-of-distribution input.
+    pwr = np.maximum((X_f ** 2).sum(axis=1, keepdims=True).mean(axis=2, keepdims=True), 1e-9)
+    X_f = X_f / np.sqrt(pwr)
 
     skipped = int((~mask).sum())
 

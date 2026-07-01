@@ -134,9 +134,13 @@ def main() -> None:
                 hmap[hi] = model_classes.index(cls)
 
         mask  = np.isin(y_raw, list(hmap.keys()))
-        X_f   = X[mask]
+        X_f   = X[mask].astype(np.float32)
         y_m   = np.array([hmap[h] for h in y_raw[mask]], dtype=np.int64)
         snrs_f = snrs[mask]
+
+        # Unit-power normalisation — matches train.py, evaluate.py, OnnxClassifier.cpp
+        pwr = np.maximum((X_f ** 2).sum(axis=1, keepdims=True).mean(axis=2, keepdims=True), 1e-9)
+        X_f = X_f / np.sqrt(pwr)
 
         probs = ensemble_probs(sessions, X_f, tta=args.tta)
 
