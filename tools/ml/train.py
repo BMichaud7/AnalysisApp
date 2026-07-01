@@ -182,6 +182,26 @@ def build_tensors(args) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
               f"across {len(FAMILY_NAMES)} families")
         class_names = FAMILY_NAMES  # fixed order, independent of what's present
 
+    # ── Global per-class cap: applies across all combined sources ────────────
+    # Per-file caps above limit contribution from any single source, but the
+    # combined dataset still exceeds RAM when multiple files each contribute
+    # their full per-class quota (4 files × 20K × 47 classes ≈ 3.76M samples
+    # ≈ 30+ GB peak, which OOM-kills on 48 GB machines). Apply a global cap
+    # here so total size stays within budget regardless of how many files are
+    # loaded. Shuffle each class's pool first so we draw evenly from all files.
+    if args.max_per_class and args.max_per_class > 0:
+        import random as _rng
+        from collections import defaultdict as _dd
+        per_class: dict = _dd(list)
+        for s in all_samples:
+            per_class[s.ground_truth].append(s)
+        all_samples = []
+        for cls_samples in per_class.values():
+            _rng.shuffle(cls_samples)
+            all_samples.extend(cls_samples[:args.max_per_class])
+        _rng.shuffle(all_samples)
+        print(f"  After global max-per-class ({args.max_per_class}): {len(all_samples):,}")
+
     print(f"Total samples: {len(all_samples)}")
     X, y, cn = samples_to_tensors(all_samples, class_names)
     print(f"  Input shape: {X.shape}  Classes: {len(cn)}")
