@@ -257,7 +257,7 @@ def generate(n: int, length: int,
                 s[idx] = float(snr)
                 idx += 1
 
-    return X[:idx], y[:idx], CLASS_NAMES
+    return X[:idx], y[:idx], s[:idx], CLASS_NAMES
 
 
 def apply_impairments(X: np.ndarray, y: np.ndarray, snrs: np.ndarray,
@@ -314,12 +314,11 @@ def main() -> None:
     print(f"Generating {len(CLASS_NAMES)} classes × {n_snrs} SNRs × {args.n} samples = {total_base} base samples")
     print(f"  IQ length: {args.len} samples")
 
-    X, y, class_names = generate(
+    X, y, snrs, class_names = generate(
         n=args.n, length=args.len,
         snr_min=args.snr_min, snr_max=args.snr_max, snr_step=args.snr_step,
         seed=args.seed,
     )
-    snrs = np.full(len(y), (args.snr_min + args.snr_max) / 2, dtype=np.float32)
 
     print(f"Base dataset: {len(X)} samples")
 
