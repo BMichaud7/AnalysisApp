@@ -239,6 +239,24 @@ class RadioFusion(nn.Module):
         self.n_fft   = n_fft
         self.hop_len = n_fft // 4
 
+        # Precompute windowed-DFT conv1d weights — avoids aten::complex during ONNX export.
+        # F.conv1d with a fixed kernel is a standard ONNX MatMul and is fully supported.
+        # Weight layout: (2*n_fft, 2, n_fft): first n_fft out-channels are Re, next Im.
+        #   Re[k] = Σ_n (I[n]*cos_kn + Q[n]*sin_kn) * hann[n]
+        #   Im[k] = Σ_n (Q[n]*cos_kn - I[n]*sin_kn) * hann[n]
+        _n = torch.arange(n_fft, dtype=torch.float32)
+        _k = torch.arange(n_fft, dtype=torch.float32)
+        _theta = 2 * torch.pi * _k.unsqueeze(1) * _n.unsqueeze(0) / n_fft  # (n_fft, n_fft)
+        _cos = torch.cos(_theta)
+        _sin = torch.sin(_theta)
+        _hann = torch.hann_window(n_fft)
+        _cos_h = _cos * _hann   # (n_fft, n_fft)
+        _sin_h = _sin * _hann
+        _w_re = torch.stack([ _cos_h,  _sin_h], dim=1)  # (n_fft, 2, n_fft): Re from (I,Q)
+        _w_im = torch.stack([-_sin_h,  _cos_h], dim=1)  # (n_fft, 2, n_fft): Im from (I,Q)
+        self.register_buffer('_dft_weight',
+                             torch.cat([_w_re, _w_im], dim=0))  # (2*n_fft, 2, n_fft)
+
         # Path A: IQ residual network (weights transfer from v10/v11)
         self.iq_path = RadioResNet(num_classes=num_classes, input_len=input_len,
                                    channels=self.IQ_CHANNELS, n_blocks=8)
@@ -299,36 +317,49 @@ class RadioFusion(nn.Module):
         )
 
     def _spectrogram(self, x: torch.Tensor) -> torch.Tensor:
-        iq = torch.complex(x[:, 0, :], x[:, 1, :])
-        window = torch.hann_window(self.n_fft, device=x.device)
-        spec = torch.stft(
-            iq.reshape(-1, iq.shape[-1]),
-            n_fft=self.n_fft, hop_length=self.hop_len,
-            win_length=self.n_fft, window=window,
-            return_complex=True,
-        )
-        return (spec.abs().unsqueeze(1) + 1e-6).log()   # (B, 1, F, T)
+        # Windowed DFT via conv1d — fully ONNX-safe (no aten::complex).
+        # padding= is a static attribute in ONNX Conv, giving statically-inferrable T.
+        # n_fft//2 zero-pad each side matches torch.stft(center=True) frame count (T=17).
+        out = F.conv1d(x, self._dft_weight,
+                       stride=self.hop_len, padding=self.n_fft // 2)  # (B, 2*n_fft, T)
+        Re  = out[:, :self.n_fft, :]                                # (B, n_fft, T)
+        Im  = out[:, self.n_fft:, :]
+        mag = (Re * Re + Im * Im + 1e-12).sqrt()                    # (B, n_fft, T)
+        return (mag.unsqueeze(1) + 1e-6).log()                      # (B, 1, n_fft, T)
 
     def _inst_features(self, x: torch.Tensor) -> torch.Tensor:
-        sig = torch.complex(x[:, 0, :], x[:, 1, :])          # (B, N)
-        ia  = sig.abs()                                        # (B, N)
-        ip  = torch.angle(sig)                                 # (B, N)
-        dip = ip[:, 1:] - ip[:, :-1]                          # (B, N-1)
-        dip = dip - 2.0 * torch.pi * torch.round(dip / (2.0 * torch.pi))
-        dip = torch.cat([dip[:, :1], dip], dim=1)             # (B, N)
+        I, Q = x[:, 0, :], x[:, 1, :]
+        ia   = (I * I + Q * Q).clamp(min=1e-12).sqrt()       # (B, N)
+        ip   = torch.atan2(Q, I)                               # (B, N)
+        dip  = ip[:, 1:] - ip[:, :-1]                         # (B, N-1)
+        dip  = dip - 2.0 * torch.pi * torch.round(dip / (2.0 * torch.pi))
+        dip  = torch.cat([dip[:, :1], dip], dim=1)            # (B, N)
         feats = torch.stack([ia, ip, dip], dim=1)             # (B, 3, N)
-        mu  = feats.mean(dim=-1, keepdim=True)
-        std = feats.std(dim=-1, keepdim=True).clamp(min=1e-6)
+        mu   = feats.mean(dim=-1, keepdim=True)
+        std  = feats.std(dim=-1, keepdim=True).clamp(min=1e-6)
         return (feats - mu) / std
 
     def _cumulants(self, x: torch.Tensor) -> torch.Tensor:
-        sig = torch.complex(x[:, 0, :], x[:, 1, :])              # (B, N)
-        p   = sig.abs().pow(2).mean(-1).clamp(min=1e-8)          # (B,) power
-        c20 = sig.pow(2).mean(-1).abs() / p                      # ~0 circular, ~1 real-valued (AM)
-        c42 = sig.abs().pow(4).mean(-1) / p.pow(2) - 2.0        # amplitude kurtosis (QAM32 vs QAM64)
-        c40 = sig.pow(4).mean(-1).abs() / p.pow(2)              # 4th-order mag (large for PSK)
-        c4p = torch.cos(4.0 * torch.angle(sig)).mean(-1).abs()  # phase 4th-moment (PSK order)
-        return torch.stack([c20, c42, c40, c4p], dim=1)          # (B, 4)
+        I, Q  = x[:, 0, :], x[:, 1, :]
+        mag2  = I * I + Q * Q
+        p     = mag2.mean(-1).clamp(min=1e-8)                 # (B,)
+        # C20: non-circularity (~0 circular, ~1 real/AM)
+        re2   = I * I - Q * Q
+        im2   = 2.0 * I * Q
+        c20   = (re2.mean(-1).pow(2) + im2.mean(-1).pow(2)).sqrt() / p
+        # C42: amplitude kurtosis (distinguishes QAM orders)
+        c42   = (mag2 * mag2).mean(-1) / p.pow(2) - 2.0
+        # C40: 4th-order cumulant magnitude
+        sq    = I * I - Q * Q
+        cr    = I * Q
+        re4   = sq * sq - 4.0 * cr * cr                       # Re(sig^4)
+        im4   = 4.0 * cr * sq                                  # Im(sig^4)
+        c40   = (re4.mean(-1).pow(2) + im4.mean(-1).pow(2)).sqrt() / p.pow(2)
+        # C4P: 4th-order phase moment (sensitive to PSK constellation order)
+        cos2  = (I * I - Q * Q) / mag2.clamp(min=1e-12)
+        cos4  = 2.0 * cos2 * cos2 - 1.0
+        c4p   = cos4.mean(-1).abs()
+        return torch.stack([c20, c42, c40, c4p], dim=1)       # (B, 4)
 
     def _extract(self, x: torch.Tensor) -> torch.Tensor:
         """Shared feature extraction → 256-dim hidden representation."""
