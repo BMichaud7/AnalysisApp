@@ -100,8 +100,14 @@ def samples_to_tensors(samples: list[IqSample],
     return X, y, class_names
 
 
-def build_tensors(args) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
-    """Load all requested sources and merge into a single tensor dataset."""
+def build_tensors(args, dann_real_set: set | None = None
+                  ) -> tuple[torch.Tensor, torch.Tensor, list[str], torch.Tensor | None]:
+    """Load all requested sources and merge into a single tensor dataset.
+
+    If dann_real_set is provided, also returns a domain-label tensor (0=synthetic,
+    1=real) whose length exactly matches X — derived from IqSample.source_file
+    during the initial load, avoiding a second full re-load of all NPZ files.
+    """
     all_samples: list[IqSample] = []
     class_names: list[str] | None = None
 
@@ -205,7 +211,18 @@ def build_tensors(args) -> tuple[torch.Tensor, torch.Tensor, list[str]]:
     print(f"Total samples: {len(all_samples)}")
     X, y, cn = samples_to_tensors(all_samples, class_names)
     print(f"  Input shape: {X.shape}  Classes: {len(cn)}")
-    return X, y, cn
+
+    domain_tensor: torch.Tensor | None = None
+    if dann_real_set is not None:
+        label_map = {m: i for i, m in enumerate(cn)}
+        domain_parts = [
+            1 if s.source_file in dann_real_set else 0
+            for s in all_samples
+            if label_map.get(s.ground_truth) is not None
+        ]
+        domain_tensor = torch.tensor(domain_parts, dtype=torch.long)
+
+    return X, y, cn, domain_tensor
 
 
 # ── Focal loss ────────────────────────────────────────────────────────────────
@@ -658,30 +675,24 @@ def main() -> None:
         print("  [warn] CUDA requested but not available, using CPU")
 
     # ── Load / generate data ──────────────────────────────────────────────────
-    X, y, class_names = build_tensors(args)
+    # Pass dann_real_set into build_tensors so domain labels are derived from
+    # IqSample.source_file during the initial load — no second NPZ reload needed.
+    dann_real_set: set | None = None
+    if args.dann > 0.0 and args.dann_real and args.npz:
+        dann_real_set = set(args.dann_real)
+        print(f"  DANN: real files = {args.dann_real}")
+    X, y, class_names, domain_tensor = build_tensors(args, dann_real_set=dann_real_set)
     input_len   = X.shape[-1]
     num_classes = len(class_names)
     print(f"  Samples: {len(X)}  Input length: {input_len}  Classes: {num_classes}")
 
-    # ── DANN domain labels (0=synthetic, 1=real) ─────────────────────────────
-    domain_tensor: torch.Tensor | None = None
-    if args.dann > 0.0 and args.dann_real and args.npz:
-        dann_real_set = set(args.dann_real)
-        print(f"  DANN: real files = {args.dann_real}")
-        domain_parts = []
-        for npz_path in args.npz:
-            s = load_numpy_npz(npz_path, snr_min_db=args.snr_min,
-                               max_per_class=args.max_per_class)
-            dom = 1 if npz_path in dann_real_set else 0
-            domain_parts.extend([dom] * len(s))
-        domain_tensor = torch.tensor(domain_parts, dtype=torch.long)
-        if len(domain_tensor) != len(X):
-            print(f"  [warn] domain label count {len(domain_tensor)} ≠ sample count "
-                  f"{len(X)} — DANN disabled")
-            domain_tensor = None
-        else:
+    # ── DANN domain label summary ─────────────────────────────────────────────
+    if dann_real_set is not None:
+        if domain_tensor is not None:
             n_real = int((domain_tensor == 1).sum())
             print(f"  Domain labels: {len(X) - n_real:,} synthetic, {n_real:,} real")
+        else:
+            print("  [warn] domain labels unavailable — DANN disabled")
 
     # ── Split ─────────────────────────────────────────────────────────────────
     # Include domain labels as batch[2] so the DANN training loop sees them.
