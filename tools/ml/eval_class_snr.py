@@ -26,7 +26,10 @@ inp = sess.get_inputs()[0].name
 preds = []
 B = 1024
 for i in range(0, len(X_f), B):
-    out = sess.run(None, {inp: X_f[i:i+B].astype(np.float32)})[0]
+    batch = X_f[i:i+B].astype(np.float32)
+    pwr = np.maximum((batch ** 2).sum(axis=1, keepdims=True).mean(axis=2, keepdims=True), 1e-9)
+    batch = batch / np.sqrt(pwr)
+    out = sess.run(None, {inp: batch})[0]
     preds.append(out.argmax(axis=1))
 preds = np.concatenate(preds)
 correct = preds == y_m

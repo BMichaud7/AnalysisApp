@@ -76,7 +76,9 @@ def main() -> None:
         st = stats[path]
 
         idx = rng.choice(len(X), size=args.batch_size, replace=False)
-        batch_X = X[idx]
+        batch_X = X[idx].astype(np.float32)
+        pwr = np.maximum((batch_X ** 2).sum(axis=1, keepdims=True).mean(axis=2, keepdims=True), 1e-9)
+        batch_X = batch_X / np.sqrt(pwr)
         logits = sess.run(None, {input_name: batch_X})[0]
         probs = softmax(logits)
         preds = np.argmax(logits, axis=1)
