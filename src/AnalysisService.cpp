@@ -549,7 +549,12 @@ void AnalysisService::onDemodCommand(const std::string& msg_type,
         json j;
         j["msg_type"]  = "STOP_DEMOD_STREAM";
         j["stream_id"] = stream_id;
-        if (amqp_handler_) amqp_handler_->publishDemodRequest(j.dump());
+        std::shared_ptr<ServiceAmqpHandler> h;
+        {
+            std::lock_guard<std::mutex> lk(q_mu_);
+            h = amqp_handler_;
+        }
+        if (h) h->publishDemodRequest(j.dump());
         spdlog::info("AnalysisService: forwarded STOP_DEMOD_STREAM stream={}", stream_id);
         return;
     }
