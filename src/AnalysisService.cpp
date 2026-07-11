@@ -222,6 +222,12 @@ public:
             work_queue_->add([this]{ pub_sender_.connection().close(); });
     }
 
+    void clear_work_queue() {
+        std::lock_guard<std::mutex> lk(pub_ready_mu_);
+        work_queue_ = nullptr;
+        pub_ready_  = false;
+    }
+
     void on_transport_error(proton::transport& t) override {
         spdlog::warn("AnalysisService: transport error: {}", t.error().what());
     }
@@ -352,11 +358,15 @@ void AnalysisService::subscriptionLoop()
         } catch (const std::exception& ex) {
             spdlog::error("AnalysisService: AMQP container exception: {}", ex.what());
         }
-
+        {
+            std::lock_guard<std::mutex> lk(q_mu_);
+            if (amqp_handler_) amqp_handler_->clear_work_queue();
+        }
         if (!running_.load()) break;
 
         spdlog::info("AnalysisService: reconnecting in 3 seconds…");
-        std::this_thread::sleep_for(std::chrono::seconds(3));
+        for (int i = 0; i < 30 && running_.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
