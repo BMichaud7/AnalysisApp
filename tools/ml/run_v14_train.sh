@@ -45,6 +45,20 @@ else
     echo "[$(ts)] synth_v12 and v7_holdout already exist — skipping regen"
 fi
 
+if [[ ! -f data/synth_v9_nodstar_1024.npz ]]; then
+    echo "[$(ts)] Stripping DSTAR from synth_v9 (conflict with 4800Hz labels)..."
+    .venv/bin/python3 -c "
+import numpy as np; src = np.load('data/synth_v9_47class_1024.npz')
+classes = src['classes'].tolist(); dstar_id = classes.index('DSTAR')
+keep = src['y'] != dstar_id
+np.savez_compressed('data/synth_v9_nodstar_1024.npz',
+    X=src['X'][keep], y=src['y'][keep], snrs=src['snrs'][keep], classes=src['classes'])
+print(f'synth_v9_nodstar: {keep.sum():,} samples')
+"
+else
+    echo "[$(ts)] synth_v9_nodstar already exists — skipping"
+fi
+
 if [[ ! -f "$RESUME_CKPT" ]]; then
     echo "[$(ts)] $RESUME_CKPT missing — run v13 first"
     exit 1
@@ -54,7 +68,7 @@ fi
 echo ""
 echo "[$(ts)] Starting v14 training (DSTAR fix fine-tune from v13)..."
 .venv/bin/python3 -u train.py \
-    --npz data/synth_v6_47class_1024.npz \
+    --npz data/synth_v9_nodstar_1024.npz \
           data/synth_v12_47class_1024.npz \
           data/synth_v11_hardboost_1024.npz \
           data/real_combined_1024.npz \
