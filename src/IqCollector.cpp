@@ -85,6 +85,7 @@ public:
             else
                 container_->stop();
             if (thread_.joinable()) thread_.join();
+            wq_ = nullptr;
             container_.reset();
         }
     }
