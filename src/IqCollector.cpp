@@ -95,6 +95,7 @@ public:
     std::string exchange(const std::string& msg_body,
                          const std::string& corr_id,
                          int timeout_ms) {
+        proton::work_queue* wq = nullptr;
         {
             std::unique_lock<std::mutex> lk(mu_);
             if (!ready_cv_.wait_for(lk, milliseconds(timeout_ms),
@@ -105,8 +106,9 @@ public:
             pending_corr_  = corr_id;
             pending_body_.clear();
             pending_done_  = false;
+            wq = wq_;
         }
-        wq_->add([this, msg_body]() mutable {
+        wq->add([this, msg_body]() mutable {
             proton::message msg;
             msg.body(msg_body);
             msg.content_type("application/json");
@@ -163,8 +165,8 @@ public:
     void on_receiver_open(proton::receiver& r) override {
         reply_addr_ = r.source().address();
         spdlog::info("[IqTaskChannel] connected, reply_to={}", reply_addr_);
-        wq_ = &r.work_queue();
         std::lock_guard<std::mutex> lk(mu_);
+        wq_ = &r.work_queue();
         ready_ = true;
         ready_cv_.notify_all();
     }

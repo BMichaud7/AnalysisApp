@@ -203,6 +203,7 @@ public:
     }
 
     void publishDemodRequest(const std::string& body) {
+        std::lock_guard<std::mutex> lk(pub_ready_mu_);
         if (!work_queue_) return;
         std::string b = body;
         work_queue_->add([this, b]() mutable {
@@ -334,13 +335,14 @@ void AnalysisService::subscriptionLoop()
                              const std::string& stream_id, const std::string& req_id) {
             onDemodCommand(msg_type, freq_hz, stream_id, req_id);
         };
-        amqp_handler_ = std::make_shared<ServiceAmqpHandler>(cfg_.amqp, on_det, on_cmd);
         std::shared_ptr<proton::container> container;
         {
-            // Guard the assignment so stop() always sees a consistent value when
-            // it copies amqp_container_ under q_mu_.
+            // Both amqp_handler_ and amqp_container_ are assigned under q_mu_
+            // so worker threads that copy amqp_handler_ under the same lock
+            // never see a torn shared_ptr during reconnect.
             std::lock_guard<std::mutex> lk(q_mu_);
             if (!running_.load()) break;
+            amqp_handler_   = std::make_shared<ServiceAmqpHandler>(cfg_.amqp, on_det, on_cmd);
             amqp_container_ = std::make_shared<proton::container>(*amqp_handler_);
             container = amqp_container_;
         }
@@ -506,9 +508,12 @@ void AnalysisService::publishResult(const AnalysisResult& r)
         recent_results_[bucket] = r;
     }
 
-    if (amqp_handler_) {
-        amqp_handler_->publish(body);
+    std::shared_ptr<ServiceAmqpHandler> h;
+    {
+        std::lock_guard<std::mutex> lk(q_mu_);
+        h = amqp_handler_;
     }
+    if (h) h->publish(body);
 
 #ifdef ANALYSIS_WITH_DB
     persistResult(r);
@@ -590,8 +595,12 @@ void AnalysisService::publishDemodRequest(const std::string& msg_type,
     if (!stream_id.empty())
         j["stream_id"]   = stream_id;
 
-    if (amqp_handler_)
-        amqp_handler_->publishDemodRequest(j.dump());
+    std::shared_ptr<ServiceAmqpHandler> h;
+    {
+        std::lock_guard<std::mutex> lk(q_mu_);
+        h = amqp_handler_;
+    }
+    if (h) h->publishDemodRequest(j.dump());
 }
 
 #ifdef ANALYSIS_WITH_DB
