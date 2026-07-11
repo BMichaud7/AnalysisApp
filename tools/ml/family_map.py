@@ -43,12 +43,15 @@ CLASS_FAMILY: dict[str, str] = {
     "FLEX":      "FSK",
     "POCSAG":    "FSK",
     # ── Digital voice / land mobile radio ────────────────────────────────────
-    "P25_C4FM":  "DIGI_VOICE",
-    "P25_PHASE2":"DIGI_VOICE",
-    "DMR":       "DIGI_VOICE",
-    "NXDN":      "DIGI_VOICE",
-    "DSTAR":     "DIGI_VOICE",
-    "TETRA":     "DIGI_VOICE",
+    # Merged into FSK: all six use FSK-derived modulation (C4FM, GMSK, 4FSK)
+    # and the router could not distinguish them from raw FSK (DIGI_VOICE→FSK
+    # was the #1 router confusion). The FSK specialist now covers all 18 classes.
+    "P25_C4FM":  "FSK",
+    "P25_PHASE2":"FSK",
+    "DMR":       "FSK",
+    "NXDN":      "FSK",
+    "DSTAR":     "FSK",
+    "TETRA":     "FSK",
     # ── Aviation / maritime data protocols ───────────────────────────────────
     "ACARS":     "PROTOCOL",
     "ADS_B":     "PROTOCOL",

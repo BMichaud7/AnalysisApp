@@ -46,16 +46,31 @@ def load_session(model_path: str) -> ort.InferenceSession:
     )
 
 
+def _normalize(batch: np.ndarray) -> np.ndarray:
+    pwr = np.maximum((batch ** 2).sum(axis=1, keepdims=True).mean(axis=2, keepdims=True), 1e-9)
+    return batch / np.sqrt(pwr)
+
+
 def run_argmax(sess: ort.InferenceSession, X: np.ndarray) -> np.ndarray:
     input_name = sess.get_inputs()[0].name
     preds = []
     for i in range(0, len(X), BATCH):
-        batch = X[i:i + BATCH].astype(np.float32)
-        pwr = np.maximum((batch ** 2).sum(axis=1, keepdims=True).mean(axis=2, keepdims=True), 1e-9)
-        batch = batch / np.sqrt(pwr)
+        batch = _normalize(X[i:i + BATCH].astype(np.float32))
         logits = sess.run(None, {input_name: batch})[0]
         preds.append(np.argmax(logits, axis=1))
     return np.concatenate(preds)
+
+
+def run_probs(sess: ort.InferenceSession, X: np.ndarray) -> np.ndarray:
+    """Return softmax probabilities [N, C]."""
+    input_name = sess.get_inputs()[0].name
+    probs = []
+    for i in range(0, len(X), BATCH):
+        batch = _normalize(X[i:i + BATCH].astype(np.float32))
+        logits = sess.run(None, {input_name: batch})[0]
+        e = np.exp(logits - logits.max(axis=1, keepdims=True))
+        probs.append(e / e.sum(axis=1, keepdims=True))
+    return np.concatenate(probs)
 
 
 def main() -> None:
@@ -68,6 +83,10 @@ def main() -> None:
                     help="Suffix tag used in specialist filenames (default v1)")
     ap.add_argument("--holdout", nargs="+", required=True, metavar="FILE")
     ap.add_argument("--out", default=None, metavar="JSON")
+    ap.add_argument("--soft-top-k", type=int, default=1, metavar="K",
+                    help="Run top-K router families and pick best specialist score (default 1=hard)")
+    ap.add_argument("--soft-threshold", type=float, default=0.0, metavar="P",
+                    help="Only use soft routing when router top-1 confidence < P (0=always soft)")
     args = ap.parse_args()
 
     router_classes = json.load(open(args.router_classes))
@@ -105,18 +124,64 @@ def main() -> None:
         true_family = np.array([CLASS_FAMILY[c] for c in true_class])
 
         # ── Stage 1: router predicts family for every sample ────────────────
-        fam_idx_pred = run_argmax(router_sess, X_f)
+        router_probs = run_probs(router_sess, X_f)   # [N, F]
+        fam_idx_pred = np.argmax(router_probs, axis=1)
         pred_family = np.array([router_classes[i] for i in fam_idx_pred])
         router_acc = float((pred_family == true_family).mean())
 
-        # ── Stage 2: route each sample to its predicted family's specialist ─
+        soft_k = max(1, args.soft_top_k)
+        threshold = args.soft_threshold  # apply soft routing when top1_prob < threshold
+
+        # ── Stage 2: route each sample to predicted family specialist(s) ────
+        # Soft routing: for each sample, run the top-K specialists and pick
+        # whichever yields the highest softmax probability for its best class.
         final_pred = np.empty(len(X_f), dtype=object)
-        for fam, sess in specialist_sess.items():
-            idx = np.where(pred_family == fam)[0]
-            if len(idx) == 0:
-                continue
-            cls_idx_pred = run_argmax(sess, X_f[idx])
-            final_pred[idx] = [specialist_classes[fam][i] for i in cls_idx_pred]
+
+        if soft_k == 1:
+            # Original hard routing
+            for fam, sess in specialist_sess.items():
+                idx = np.where(pred_family == fam)[0]
+                if len(idx) == 0:
+                    continue
+                cls_idx_pred = run_argmax(sess, X_f[idx])
+                final_pred[idx] = [specialist_classes[fam][i] for i in cls_idx_pred]
+        else:
+            # Soft routing: per-sample top-K families, pick best specialist score
+            top_k_fam_idx = np.argsort(router_probs, axis=1)[:, -soft_k:][:, ::-1]  # [N, K]
+
+            # Cache specialist probs per family for samples that need them
+            spec_cache: dict[str, np.ndarray] = {}  # fam → probs [N, C]
+            for fam in router_classes:
+                if fam not in specialist_sess:
+                    continue
+                need = np.unique(
+                    np.where(np.isin(top_k_fam_idx, [router_classes.index(fam)]))[0]
+                    if threshold == 0.0 else
+                    np.where(
+                        (router_probs[:, router_classes.index(fam)] > 0) &
+                        ((top_k_fam_idx[:, 0] == router_classes.index(fam)) |
+                         (router_probs.max(axis=1) < threshold))
+                    )[0]
+                )
+                if len(need) == 0:
+                    continue
+                spec_cache[fam] = run_probs(specialist_sess[fam], X_f)  # full pass for simplicity
+
+            for n in range(len(X_f)):
+                top1_conf = router_probs[n, fam_idx_pred[n]]
+                k = soft_k if (threshold == 0.0 or top1_conf < threshold) else 1
+                best_cls, best_conf = None, -1.0
+                for ki in range(min(k, len(router_classes))):
+                    fi = top_k_fam_idx[n, ki]
+                    fam = router_classes[fi]
+                    if fam not in spec_cache:
+                        continue
+                    p = spec_cache[fam][n]
+                    ci = int(np.argmax(p))
+                    if p[ci] > best_conf:
+                        best_conf = p[ci]
+                        best_cls = specialist_classes[fam][ci]
+                final_pred[n] = best_cls
 
         correct = (final_pred == true_class)
         overall_acc = float(correct.mean())
@@ -141,9 +206,13 @@ def main() -> None:
             "per_snr": per_snr,
         }
 
+        routing_mode = f"soft-top-{soft_k}" if soft_k > 1 else "hard"
+        if soft_k > 1 and threshold > 0.0:
+            routing_mode += f" (threshold={threshold:.2f})"
         print(f"\n{'='*62}")
         print(f"  {npz_path}")
         print(f"  samples={result['total_samples']}  skipped={result['skipped_no_specialist']}")
+        print(f"  Routing: {routing_mode}")
         print(f"  Router family accuracy: {router_acc*100:.1f}%")
         print(f"  Chained overall accuracy: {overall_acc*100:.1f}%")
         print(f"{'='*62}")
