@@ -354,17 +354,14 @@ class Session:
 
 # ── IQ collection ─────────────────────────────────────────────────────────────
 
-def collect_iq(port: int, dwell_s: float) -> np.ndarray:
+def _collect_iq_sock(s: socket.socket, dwell_s: float) -> np.ndarray:
     """
-    Receive UDP IQ packets for dwell_s + TUNE_OVERHEAD_S seconds.
+    Receive UDP IQ packets on pre-bound socket for dwell_s seconds.
 
     Uses short recv() timeout (0.3 s) with `continue` so we keep polling
-    through the PlutoSDR PLL calibration delay (~3-4 s) without missing data.
+    through the PLL calibration delay (~3-4 s) without missing data.
+    Closes the socket before returning.
     """
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)
-    s.settimeout(0.3)
-    s.bind(("", port))
     chunks: list[np.ndarray] = []
     deadline = time.time() + dwell_s + TUNE_OVERHEAD_S
     try:
@@ -393,6 +390,16 @@ def request_capture(sess: Session,
                     verbose: bool = False,
                     dest_ip: str = DEST_IP) -> np.ndarray | None:
     """Submit WIDEBAND task, collect IQ.  Returns None on failure."""
+    # Pre-bind a UDP socket BEFORE submitting the task so the controller
+    # can stream to an already-listening socket (same pattern as IqFetcher).
+    # Including dest_ports is REQUIRED — without it the controller accepts
+    # the task and tunes the hardware but never sends any UDP data.
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)
+    udp_sock.settimeout(0.3)
+    udp_sock.bind(("", 0))
+    pre_bound_port = udp_sock.getsockname()[1]
+
     rid = str(uuid.uuid4())
     resp = sess.rpc({
         "msg_type": "TASK_REQUEST", "schema_version": "2.0",
@@ -410,27 +417,22 @@ def request_capture(sess: Session,
             "rx_gain_db": [gain_db],
             "rx_agc": [False],
         },
-        "streaming": {"dest_ip": dest_ip},
+        "streaming": {"dest_ip": dest_ip, "dest_ports": [pre_bound_port]},
         "wideband": {"record_raw_iq": True, "fft_size": 4096},
     }, timeout=40)
 
     if not resp or resp.get("status") != "ACCEPTED":
+        udp_sock.close()
         reason = resp.get("reject_reason", "timeout") if resp else "no response"
         if verbose:
             print(f"    REJECTED: {reason}")
         return None
 
-    streams = resp.get("streams", [])
-    if not streams:
-        if verbose:
-            print("    ACCEPTED but no streams in response")
-        return None
-    port    = streams[0].get("udp_port")
     task_id = resp["task_id"]
     if verbose:
-        print(f"    Accepted udp_port={port}", flush=True)
+        print(f"    Accepted → streaming to {dest_ip}:{pre_bound_port}", flush=True)
 
-    iq = collect_iq(port, dwell_s)
+    iq = _collect_iq_sock(udp_sock, dwell_s)
 
     sess.fire({
         "msg_type": "TASK_STOP", "request_id": str(uuid.uuid4()),
