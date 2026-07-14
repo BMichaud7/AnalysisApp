@@ -273,18 +273,27 @@ TARGETS: list[tuple] = [
 class _H(proton.handlers.MessagingHandler):
     def __init__(self, sess):
         super().__init__()
-        self._s = sess
+        self._s       = sess
+        self._dyn_rcv = None
 
     def on_start(self, ev):
         c = ev.container.connect(self._s._broker, user=self._s._user,
                                  password=self._s._password,
                                  sasl_enabled=True, allowed_mechs="PLAIN")
-        ev.container.create_receiver(c, RESP_Q)
-        self._sender = ev.container.create_sender(c, REQ_Q)
+        # Dynamic (temporary) receiver so our reply address is unique and
+        # doesn't compete with sdr_acquisition consuming the shared RESP_Q.
+        self._dyn_rcv = ev.container.create_receiver(c, None, dynamic=True)
+        self._sender  = ev.container.create_sender(c, REQ_Q)
         self._s._handler = self
 
+    def on_link_opened(self, ev):
+        if ev.receiver and ev.receiver == self._dyn_rcv:
+            self._s._reply_addr = ev.receiver.remote_source.address
+            self._s._ready.set()
+
     def on_sendable(self, ev):
-        self._s._ready.set()
+        # Don't set ready here — wait for on_link_opened to give us reply addr.
+        pass
 
     def on_message(self, ev):
         try:
@@ -298,9 +307,10 @@ class _H(proton.handlers.MessagingHandler):
             e[1].append(msg)
             e[0].set()
 
-    def send(self, d):
+    def send(self, d, reply_to: str | None = None):
         self._sender.send(proton.Message(body=json.dumps(d),
-                                         content_type="application/json"))
+                                         content_type="application/json",
+                                         reply_to=reply_to or ""))
 
 
 class Session:
@@ -309,10 +319,11 @@ class Session:
         self._broker   = broker
         self._user     = user
         self._password = password
-        self._pending: dict = {}
-        self._lock    = threading.Lock()
-        self._ready   = threading.Event()
-        self._handler = None
+        self._pending:    dict = {}
+        self._lock        = threading.Lock()
+        self._ready       = threading.Event()
+        self._handler     = None
+        self._reply_addr: str = ""
         self._ctr     = proton.reactor.Container(_H(self))
         threading.Thread(target=self._ctr.run, daemon=True).start()
         if not self._ready.wait(15):
@@ -325,14 +336,14 @@ class Session:
         ev, box = threading.Event(), []
         with self._lock:
             self._pending[rid] = (ev, box)
-        self._handler.send(req)
+        self._handler.send(req, reply_to=self._reply_addr)
         ev.wait(timeout)
         with self._lock:
             self._pending.pop(rid, None)
         return box[0] if box else None
 
     def fire(self, req: dict) -> None:
-        self._handler.send(req)
+        self._handler.send(req, reply_to=self._reply_addr)
 
     def close(self) -> None:
         try:
