@@ -748,6 +748,7 @@ def main() -> None:
         'QAM16', 'QAM32', 'QAM64',
         'AM_DSB', 'DSTAR', 'TETRA', 'NAVTEX', 'RTTY',
         'P25_C4FM', 'NXDN', 'DTMF', 'GFSK', 'FSK', 'TONE', '4FSK', '8FSK',
+        'FLEX',
     }
     boost_factor = args.boost_hard or args.boost_qam  # accept either flag
     # Optionally wrap train_ds with domain labels for DANN
