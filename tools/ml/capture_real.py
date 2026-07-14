@@ -51,7 +51,7 @@ BROKER   = "amqp://localhost:5672"
 REQ_Q    = "sdr.task.request"
 RESP_Q   = "sdr.task.response"
 CREDS    = ("sdr_ctrl", "sdr_ctrl")   # dev-local broker; override with --broker-password
-DEST_IP  = "127.0.0.1"
+DEST_IP  = "127.0.0.1"   # override with --dest-ip when controller is containerized
 IQ_HDR   = struct.Struct("<I I Q Q I H B B")
 IQ_MAGIC = 0x49515030
 
@@ -390,7 +390,8 @@ def collect_iq(port: int, dwell_s: float) -> np.ndarray:
 def request_capture(sess: Session,
                     freq_hz: float, bw_hz: float, sr_sps: float,
                     gain_db: float, dwell_s: float,
-                    verbose: bool = False) -> np.ndarray | None:
+                    verbose: bool = False,
+                    dest_ip: str = DEST_IP) -> np.ndarray | None:
     """Submit WIDEBAND task, collect IQ.  Returns None on failure."""
     rid = str(uuid.uuid4())
     resp = sess.rpc({
@@ -409,7 +410,7 @@ def request_capture(sess: Session,
             "rx_gain_db": [gain_db],
             "rx_agc": [False],
         },
-        "streaming": {"dest_ip": DEST_IP},
+        "streaming": {"dest_ip": dest_ip},
         "wideband": {"record_raw_iq": True, "fft_size": 4096},
     }, timeout=40)
 
@@ -511,6 +512,8 @@ def main() -> None:
     ap.add_argument("--broker-url",      default=BROKER)
     ap.add_argument("--broker-user",     default=CREDS[0])
     ap.add_argument("--broker-password", default=CREDS[1])
+    ap.add_argument("--dest-ip", default=DEST_IP,
+                    help="IP the controller streams UDP to (use host IP when controller is containerized)")
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -544,7 +547,8 @@ def main() -> None:
               f"BW={bw_hz/1e3:.0f} kHz  {dwell_s}s  max={cap_max}", flush=True)
 
         iq = request_capture(sess, freq_hz, bw_hz, sr_sps,
-                             args.gain, dwell_s, verbose=args.verbose)
+                             args.gain, dwell_s, verbose=args.verbose,
+                             dest_ip=args.dest_ip)
 
         if iq is None:
             print("  → No IQ (controller rejected or silent)\n")
