@@ -24,6 +24,9 @@ for f in dict.fromkeys(files):   # deduplicate paths, preserve order
     if not f.exists():
         continue
     d = np.load(f)
+    if d['X'].shape[2] != 1024:
+        print(f'  SKIP {f.name}: window={d["X"].shape[2]} (not 1024)')
+        continue
     if classes_ref is None:
         classes_ref = d['classes'].tolist()
     src_cls = d['classes'].tolist()
