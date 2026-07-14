@@ -50,13 +50,13 @@ import proton.reactor
 BROKER   = "amqp://localhost:5672"
 REQ_Q    = "sdr.task.request"
 RESP_Q   = "sdr.task.response"
-CREDS    = ("sdr_ctrl", "sdr_hw_test")
+CREDS    = ("sdr_ctrl", "sdr_ctrl")   # dev-local broker; override with --broker-password
 DEST_IP  = "127.0.0.1"
 IQ_HDR   = struct.Struct("<I I Q Q I H B B")
 IQ_MAGIC = 0x49515030
 
-WINDOW = 512    # samples per window — must match model input_len
-STRIDE = 128    # stride between windows (75 % overlap for diversity)
+WINDOW = 1024   # samples per window — must match model input_len (all NPZs use 1024)
+STRIDE = 256    # stride between windows (75 % overlap for diversity)
 
 # AD9361 LO settles in ~25 µs after setFrequency.  The sample rate is now
 # locked (fixed_sample_rate_hz in devices.xml) so setSampleRate is never
@@ -276,7 +276,8 @@ class _H(proton.handlers.MessagingHandler):
         self._s = sess
 
     def on_start(self, ev):
-        c = ev.container.connect(BROKER, user=CREDS[0], password=CREDS[1],
+        c = ev.container.connect(self._s._broker, user=self._s._user,
+                                 password=self._s._password,
                                  sasl_enabled=True, allowed_mechs="PLAIN")
         ev.container.create_receiver(c, RESP_Q)
         self._sender = ev.container.create_sender(c, REQ_Q)
@@ -303,14 +304,21 @@ class _H(proton.handlers.MessagingHandler):
 
 
 class Session:
-    def __init__(self):
+    def __init__(self, broker: str = BROKER,
+                 user: str = CREDS[0], password: str = CREDS[1]):
+        self._broker   = broker
+        self._user     = user
+        self._password = password
         self._pending: dict = {}
         self._lock    = threading.Lock()
         self._ready   = threading.Event()
         self._handler = None
         self._ctr     = proton.reactor.Container(_H(self))
         threading.Thread(target=self._ctr.run, daemon=True).start()
-        self._ready.wait(15)
+        if not self._ready.wait(15):
+            raise RuntimeError(
+                f"AMQP connect to {broker} as {user!r} timed out after 15 s "
+                "(wrong password or broker not running?)")
 
     def rpc(self, req: dict, timeout: float = 40) -> dict | None:
         rid = req["request_id"]
@@ -400,7 +408,12 @@ def request_capture(sess: Session,
             print(f"    REJECTED: {reason}")
         return None
 
-    port    = resp["streams"][0].get("udp_port")
+    streams = resp.get("streams", [])
+    if not streams:
+        if verbose:
+            print("    ACCEPTED but no streams in response")
+        return None
+    port    = streams[0].get("udp_port")
     task_id = resp["task_id"]
     if verbose:
         print(f"    Accepted udp_port={port}", flush=True)
@@ -484,18 +497,22 @@ def main() -> None:
     ap.add_argument("--max-per-class", type=int, default=8000)
     ap.add_argument("--filter-classes", nargs="+", metavar="CLS",
                     help="Only capture these classes (subset of TARGETS)")
+    ap.add_argument("--broker-url",      default=BROKER)
+    ap.add_argument("--broker-user",     default=CREDS[0])
+    ap.add_argument("--broker-password", default=CREDS[1])
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
     print("=" * 60)
     print(" PlutoSDR Real IQ Capture")
     print(f"  Output:        {args.out}")
+    print(f"  Broker:        {args.broker_url}  user={args.broker_user}")
     print(f"  Gain:          {args.gain} dB")
     print(f"  SNR threshold: {args.snr_min} dB")
     print(f"  Max/class:     {args.max_per_class}")
     print("=" * 60, flush=True)
 
-    sess = Session()
+    sess = Session(args.broker_url, args.broker_user, args.broker_password)
     print("AMQP session ready.\n", flush=True)
 
     all_X:   list[np.ndarray] = []
