@@ -80,12 +80,14 @@ public:
 
     void stop() {
         if (container_) {
-            if (wq_)
-                wq_->add([this]{ sender_.connection().close(); });
+            proton::work_queue* wq = nullptr;
+            { std::lock_guard<std::mutex> lk(mu_); wq = wq_; }
+            if (wq)
+                wq->add([this]{ sender_.connection().close(); });
             else
                 container_->stop();
             if (thread_.joinable()) thread_.join();
-            wq_ = nullptr;
+            { std::lock_guard<std::mutex> lk(mu_); wq_ = nullptr; }
             container_.reset();
         }
     }
