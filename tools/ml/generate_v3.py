@@ -563,20 +563,25 @@ def _acars(n: int, rng: np.random.Generator) -> np.ndarray:
 
 
 def _flex(n: int, rng: np.random.Generator) -> np.ndarray:
-    """FLEX paging: 4-FSK, 1600 baud, ±1600 Hz deviation. Includes sync 0xA8C9."""
+    """FLEX paging: 4-FSK, 1600 baud, ±1600/±600 Hz deviation.
+
+    At SR=200kHz sps=125 → only ~8 symbols per 1024-sample window.  The sync
+    pattern is the primary discriminator — always insert it so the model sees
+    the same 4-dibit leading signature regardless of random data that follows.
+    Old bug: inserted 8 dibits (full window) → all samples identical, collapsed
+    intra-class diversity.  Too-small fix: 2 dibits / 50% → too weak a cue.
+    Correct: 4 dibits always (≈ half window), random tail for diversity.
+    Note: real improvement requires longer capture windows (≥4096 samples) or
+    a dedicated FLEX decimator feeding the classifier.
+    """
     sps = max(4, int(SR / 1600.0))
     dev = np.array([-1600, -600, 600, 1600], dtype=float) / SR
     n_syms = math.ceil(n / sps) + 5
     syms = rng.integers(0, 4, n_syms)
-    # Insert FLEX sync word 0xA8C9 as dibits. sps=125 means 8 sync symbols
-    # (the old length) = 1000/1024 samples -- almost the ENTIRE window was the
-    # fixed sync pattern with no random data, collapsing intra-class diversity
-    # (every sample showed the same constant bandwidth). Keep the sync short
-    # and only sometimes present so most windows show randomized data symbols.
-    sync_dibits = [2,2,3,1,2,2,3,1]  # 0xA8C9 approximated as 4-level
-    pre_len = min(2, n_syms)
-    if rng.random() > 0.5:
-        syms[:pre_len] = sync_dibits[:pre_len]
+    # FLEX A1 sync word 0x870C as dibits (MSB first): [2,0,0,3,1,1,0,0]
+    sync_dibits = [2, 0, 0, 3, 1, 1, 0, 0]
+    pre_len = min(4, n_syms)  # always 4 sync dibits; random tail = diversity
+    syms[:pre_len] = sync_dibits[:pre_len]
     freq_seq = np.repeat([dev[s] for s in syms], sps)[:n]
     phase = np.cumsum(2 * math.pi * freq_seq)
     return _norm(np.exp(1j * phase).astype(np.complex64))
@@ -850,18 +855,20 @@ def _gen_one(cls: str, n: int, rng: np.random.Generator) -> np.ndarray:
     if cls == "BPSK":      return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.30, 0.50)))
     if cls == "QPSK":      return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.25, 0.45)))
     if cls == "8PSK":      return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.18, 0.35)))
-    if cls == "16PSK":     return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.12, 0.25)))
-    if cls == "32PSK":     return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.07, 0.18)))
+    if cls == "16PSK":     return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.13, 0.25)))
+    if cls == "32PSK":     return _digital(PSK_CONSTS[cls], n, rng, sps, float(rng.uniform(0.05, 0.12)))
     if cls in PSK_CONSTS:  return _digital(PSK_CONSTS[cls], n, rng, sps, ro)  # fallback
     # Per-order rolloff gives the model a spectral BW cue between QAM grades.
-    # Ranges are grounded in real deployments (DOCSIS, DVB-C, cable modem):
-    #   QAM16  — looser rolloff, wider channels (legacy cable / basic DOCSIS)
-    #   QAM64  — moderate (DOCSIS 3.0 common)
-    #   QAM256 — tight rolloff, spectrally efficient (DOCSIS 3.0/3.1 high tier)
-    if cls == "QAM16":  return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.30, 0.50)))
-    if cls == "QAM32":  return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.20, 0.40)))
-    if cls == "QAM64":  return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.13, 0.28)))
-    if cls == "QAM256": return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.08, 0.18)))
+    # Ranges grounded in real deployments (DOCSIS, DVB-C, cable modem).
+    # Non-overlapping so training samples for adjacent orders are always distinct:
+    #   QAM16  [0.32, 0.50] — legacy cable / DOCSIS 1.x
+    #   QAM32  [0.22, 0.31] — gap separates from QAM16 and QAM64
+    #   QAM64  [0.15, 0.21] — DOCSIS 3.0 typical
+    #   QAM256 [0.05, 0.14] — DOCSIS 3.0/3.1 high tier (tight, spectrally efficient)
+    if cls == "QAM16":  return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.32, 0.50)))
+    if cls == "QAM32":  return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.22, 0.31)))
+    if cls == "QAM64":  return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.15, 0.21)))
+    if cls == "QAM256": return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), float(rng.uniform(0.05, 0.14)))
     if cls in QAM_CONSTS: return _digital(QAM_CONSTS[cls], n, rng, max(sps,5), ro)  # fallback
     if cls == "FM_WB":     return _fm_wb(n, rng)
     if cls == "FM_NB":     return _fm_nb(n, rng)
