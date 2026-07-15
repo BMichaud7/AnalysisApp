@@ -109,15 +109,13 @@ def capture_target(label: str, freq_hz: float, sr_sps: int, dwell_s: float,
                    gain: float, verbose: bool) -> np.ndarray:
     """Capture dwell_s seconds of IQ from rtl_sdr, return complex64 array."""
     n_samples = int(sr_sps * dwell_s)
-    # rtl_sdr samples: uint8 interleaved I,Q, centred at 127
-    n_bytes = n_samples * 2
 
     cmd = [
         "rtl_sdr",
         "-f", str(int(freq_hz)),
         "-s", str(sr_sps),
         "-g", str(gain),
-        "-n", str(n_bytes),
+        "-n", str(n_samples),   # rtl_sdr -n takes sample count, not byte count
         "-",
     ]
     if verbose:
