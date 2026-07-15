@@ -109,6 +109,35 @@ OnnxClassifier::OnnxClassifier(const OnnxConfig& cfg)
             spdlog::info("OnnxClassifier: running on CPU");
 
         session_ = Ort::Session(env_, cfg_.model_path.c_str(), opts);
+
+        // Validate model shapes against config and classes file to fail fast
+        // on model/config version mismatch instead of at first inference call.
+        auto in_shape  = session_.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+        auto out_shape = session_.GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+
+        if (in_shape.size() < 3) {
+            throw std::runtime_error("OnnxClassifier: model input rank " +
+                std::to_string(in_shape.size()) + " < 3, expected (batch,2,len)");
+        }
+        // in_shape[2] is -1 when dynamic; skip check in that case
+        if (in_shape[2] > 0 && in_shape[2] != static_cast<int64_t>(cfg_.input_len)) {
+            throw std::runtime_error("OnnxClassifier: model input_len=" +
+                std::to_string(in_shape[2]) + " != configured input_len=" +
+                std::to_string(cfg_.input_len) +
+                " — redeploy model or update analysis.xml <input_len>");
+        }
+        if (out_shape.size() < 2) {
+            throw std::runtime_error("OnnxClassifier: model output rank " +
+                std::to_string(out_shape.size()) + " < 2, expected (batch,n_classes)");
+        }
+        // out_shape[1] is -1 when dynamic; skip check in that case
+        if (out_shape[1] > 0 && out_shape[1] != static_cast<int64_t>(class_names_.size())) {
+            throw std::runtime_error("OnnxClassifier: model n_classes=" +
+                std::to_string(out_shape[1]) + " != classes file '" +
+                cfg_.classes_path + "' (" +
+                std::to_string(class_names_.size()) + " entries)");
+        }
+
         loaded_  = true;
 
         spdlog::info("OnnxClassifier: loaded '{}' — {} classes, input_len={}, max_batch={}",
@@ -164,8 +193,13 @@ OnnxResult OnnxClassifier::classify(const std::vector<float>& iq_cf32,
                                     in_names, &tensor, 1,
                                     out_names, 1);
 
+        auto out_shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+        if (out_shape.size() < 2)
+            throw std::runtime_error("ONNX output rank " +
+                std::to_string(out_shape.size()) + " unexpected");
+
         float*  logits = outputs[0].GetTensorMutableData<float>();
-        int64_t n_cls  = outputs[0].GetTensorTypeAndShapeInfo().GetShape()[1];
+        int64_t n_cls  = out_shape[1];
 
         std::vector<float> probs(logits, logits + n_cls);
         softmax(probs);
@@ -231,8 +265,13 @@ std::vector<OnnxResult> OnnxClassifier::classifyBatch(
         auto outputs = session_.Run(Ort::RunOptions{nullptr},
                                     in_names, &tensor, 1, out_names, 1);
 
+        auto batch_out_shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+        if (batch_out_shape.size() < 2)
+            throw std::runtime_error("ONNX batch output rank " +
+                std::to_string(batch_out_shape.size()) + " unexpected");
+
         float*  logits = outputs[0].GetTensorMutableData<float>();
-        int64_t n_cls  = outputs[0].GetTensorTypeAndShapeInfo().GetShape()[1];
+        int64_t n_cls  = batch_out_shape[1];
 
         for (int b = 0; b < B; ++b) {
             std::vector<float> probs(logits + b * n_cls, logits + (b + 1) * n_cls);
