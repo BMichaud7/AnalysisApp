@@ -84,8 +84,10 @@ public:
             { std::lock_guard<std::mutex> lk(mu_); wq = wq_; }
             if (wq)
                 wq->add([this]{ sender_.connection().close(); });
-            else
-                container_->stop();
+            // Always stop the container: if wq_ is stale (transport error,
+            // reconnect in progress) the close() above is silently dropped
+            // and thread_.join() would hang indefinitely without this.
+            container_->stop();
             if (thread_.joinable()) thread_.join();
             { std::lock_guard<std::mutex> lk(mu_); wq_ = nullptr; }
             container_.reset();
