@@ -197,7 +197,9 @@ def main() -> None:
         windows = windows[:min(len(windows), room, max_win)]
 
         for w in windows:
-            buckets[label].append(w)
+            buckets[label].append(
+                np.stack([w.real, w.imag], axis=0).astype(np.float32)  # (2, WINDOW)
+            )
         counts[label] += len(windows)
         print(f"+{len(windows)} windows  (total {counts[label]})", flush=True)
 
@@ -205,30 +207,29 @@ def main() -> None:
         print("No data captured — check RTL-SDR connection.", file=sys.stderr)
         sys.exit(1)
 
-    # Build X (N, 1024, 2) and Y arrays compatible with train.py
+    # Build X (N, 2, WINDOW) and y arrays compatible with train.py / capture_real.py
     all_labels = sorted(buckets.keys())
-    label_to_idx = {l: i for i, l in enumerate(all_labels)}
+    label_to_idx = {lbl: i for i, lbl in enumerate(all_labels)}
 
-    X_list, Y_list = [], []
+    X_list, y_list = [], []
     for label, wins in buckets.items():
         idx = label_to_idx[label]
         for w in wins:
-            plane = np.stack([w.real, w.imag], axis=-1).astype(np.float32)
-            X_list.append(plane)
-            Y_list.append(idx)
+            X_list.append(w)        # already (2, WINDOW) float32
+            y_list.append(idx)
 
-    X = np.stack(X_list, axis=0)   # (N, 1024, 2)
-    Y = np.array(Y_list, dtype=np.int64)
+    X = np.stack(X_list, axis=0)   # (N, 2, WINDOW)
+    y = np.array(y_list, dtype=np.int64)
 
     np.savez_compressed(
         out_path,
         X=X,
-        Y=Y,
-        class_names=np.array(all_labels),
-        snrs=np.zeros(len(Y_list), dtype=np.float32),   # placeholder
+        y=y,
+        classes=np.array(all_labels),
+        snrs=np.zeros(len(y_list), dtype=np.float32),   # placeholder
     )
 
-    print(f"\nSaved {len(Y)} windows, {len(all_labels)} classes → {out_path}", flush=True)
+    print(f"\nSaved {len(y)} windows, {len(all_labels)} classes → {out_path}", flush=True)
     for lbl in all_labels:
         print(f"  {lbl}: {counts[lbl]}", flush=True)
 
