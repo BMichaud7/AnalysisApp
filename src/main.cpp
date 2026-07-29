@@ -17,6 +17,8 @@ Contact author for permission: https://github.com/OpenRFStack
 #include <csignal>
 #include <atomic>
 #include <cstring>
+#include <thread>
+#include <chrono>
 
 static std::atomic<bool> g_shutdown{false};
 
@@ -58,11 +60,11 @@ int main(int argc, char** argv)
     analysis::AnalysisService svc(cfg);
     svc.start();
 
-    // Block until signal
-    sigset_t mask;
-    sigemptyset(&mask);
+    // Block until signal. Polling avoids the TOCTOU race in sigsuspend():
+    // if the signal arrives between g_shutdown.load() and sigsuspend(),
+    // it is consumed before sigsuspend() enters and the process hangs.
     while (!g_shutdown.load()) {
-        sigsuspend(&mask);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     spdlog::info("Stopping…");
