@@ -405,13 +405,10 @@ def export_onnx(model: nn.Module,
     dummy = torch.randn(*input_shape)
 
     torch.onnx.export(
-        model, dummy, out_path,
-        export_params=True,
-        opset_version=opset,
-        dynamo=False,
+        model, (dummy,), out_path,
         input_names=["iq_input"],
         output_names=["logits"],
-        dynamic_axes={"iq_input": {0: "batch"}, "logits": {0: "batch"}},
+        dynamo=True,
     )
 
     # Validate
